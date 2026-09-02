@@ -1,63 +1,100 @@
 # verifyum-verify
 
 The verification half of [Verifyum](https://verifyum.com), published so that
-a proof can be checked without trusting the operator.
+a proof can be checked without trusting the operator, in the language you
+already run.
 
 A Verifyum proof says that a commitment to the exact bytes of a file existed
 no later than the block time of a finalized Solana Mainnet transaction. The
 file never leaves the machine that made the proof. Only a domain-separated
 commitment, built from the file hash and a random nonce, is anchored. This
-repository holds the code that defines that commitment, the checkpoint
-format the witnesses receive, and the checks a reader can run against the
-public records. It does not hold the operational side: the signer, the
-queue, the publisher adapters and the web tier stay private.
+repository holds the rules that define that commitment, the checkpoint format
+the witnesses receive, and implementations of the checks in four languages,
+each verified against the same live records and against each other. It does
+not hold the operational side: the signer, the queue, the publisher adapters
+and the web tier stay private.
+
+## The spec
+
+`PROTOCOL.md` states every hashing rule byte for byte: the digest form, the
+canonical JSON subset (RFC 8785 with the exact escaping and ordering the
+reference uses), the checkpoint hash, the checkpoint document and its digest,
+the proof leaf, the checkpoint leaf, the node hash, the tree, the path walk,
+and the Ed25519 service signature. It was written from the PHP reference and
+then checked against it line by line. A port in any language starts there.
 
 ## What is here
 
 | Path | What it is |
 |---|---|
-| `libs/func_verifyum.php` | Protocol v2: canonical manifest (RFC 8785), commitment, proof ID, service key registry |
-| `libs/func_verifyum_witness.php` | Witness Layer v1: checkpoints, Merkle trees, membership proofs, channel receipts |
+| `PROTOCOL.md` | The byte-exact spec, with the expected values for the live vectors |
+| `libs/func_verifyum.php` | Reference: protocol v2, canonical manifest, commitment, proof ID, key registry |
+| `libs/func_verifyum_witness.php` | Reference: Witness Layer v1, checkpoints, Merkle trees, membership, receipts |
 | `libs/func_verifyum_services.php` | The four helpers the witness library needs, copied verbatim from the private services library |
 | `tools/check-protocol.php` | Deterministic checks of the protocol against fixed vectors |
-| `clients/verifyum-protocol.js` | The browser implementation of the same protocol |
-| `clients/verifyum.py` | A single-file library, standard library only, Python 3.10 or later |
-| `clients/verifyum.mjs` | A single-file library for Node 20 or any runtime with Web Crypto and fetch |
+| `clients/verifyum.py` | Python 3.10+, standard library only. Anchors, verifies, and checks a proof against its witnesses |
+| `clients/verifyum.mjs` | Node 20+, no dependencies. Same |
+| `clients/rust/` | Rust library and check binary, pinned crates |
+| `clients/verifyum-protocol.js` | The browser implementation of the commitment |
+| `checks/` | The check programs, the live vectors they must reproduce, and the PHP oracle |
 | `schemas/` | JSON Schemas for proofs, manifests, checkpoints, memberships and receipts |
 
-The two clients are libraries, not commands. Running them directly does
-nothing. Import them.
+Go and a bash-only verifier exist as drafts and are not in this repository:
+neither has been executed here, and an unexecuted port has no place in a
+repository whose purpose is verification.
 
 ## Run the checks
 
-    php tools/check-protocol.php
+From the repository root. Every program prints the same eleven lines, one
+value per line, and exits 0 only if every value matches the live records.
 
-Every line should read `ok`. The checks use fixed vectors and touch no
-network.
+    php tools/check-protocol.php
+    php checks/oracle.php
+    python checks/check.py
+    node checks/check.mjs
+    cargo run --manifest-path clients/rust/Cargo.toml --release --bin check
+
+`checks/oracle.php` is the PHP reference computing the same values; the three
+ports must be byte-identical to it. `checks/vectors/EXPECTED.md` lists the
+values. The vectors are a real public proof and the checkpoints it belongs
+to, fetched from the live service, so a change in any rule shows up as a
+mismatch against a record that also lives in Bitcoin, a qualified timestamp,
+a Sigsum log and Certificate Transparency.
+
+The Python check needs the `cryptography` package for the signature line;
+without it that line reads `unchecked` and the rest still runs. The PHP
+oracle needs the sodium extension.
 
 ## Use the clients
 
+The two single-file clients are libraries, not commands. Running them
+directly does nothing. Import them.
+
 Python, from the `clients` directory or with it on `sys.path`:
 
-    from verifyum import anchor_file, verify
+    from verifyum import anchor_file, verify, verify_witness
 
     proof = anchor_file("contract.pdf")
     print(proof["proof_url"])
     # keep proof["draft"], it holds the nonce
 
     verify(proof["proof_id"], open("contract.pdf", "rb").read(), proof["draft"])
+    verify_witness(proof["proof_id"])
 
 Node:
 
-    import { anchorFile, verify } from "./clients/verifyum.mjs";
+    import { anchorFile, verify, verifyWitness } from "./clients/verifyum.mjs";
 
     const proof = await anchorFile("contract.pdf");
     await verify(proof.proof_id, await readFile("contract.pdf"), proof.draft);
+    await verifyWitness(proof.proof_id);
 
 `anchorFile` creates a real proof on Solana Mainnet. `verify` recomputes the
 commitment from the bytes and the draft and compares it with the public
 record. The draft holds the nonce. Without it nobody, including Verifyum, can
-link the file to the proof.
+link the file to the proof. `verifyWitness` fetches the membership record,
+recomputes the leaf from the public metadata, walks the path to the hourly
+checkpoint root and checks the service signature.
 
 Both clients read `VERIFYUM_API_BASE` and `VERIFYUM_PROOF_DOMAIN` from the
 environment, so they can be pointed at another deployment for testing.
@@ -79,27 +116,27 @@ there is no listing, so you need the ID from whoever made the proof.
 
 3. **The service signature.** The proof carries an Ed25519 signature by
    Verifyum over its public metadata. The key registry is at
-   `https://verifyum.com/.well-known/verifyum-service-keys.json`.
-   `verifyum_service_verify_metadata_signature` in the shim checks it. This
-   is Verifyum vouching for Verifyum. It detects a modified copy, and it is
-   not independent evidence.
+   `https://verifyum.com/.well-known/verifyum-service-keys.json`. This is
+   Verifyum vouching for Verifyum. It detects a modified copy, and it is not
+   independent evidence.
 
 4. **The witnesses.** `https://api.verifyum.com/v2/proofs/<proof-id>/witnesses`
    returns the Merkle path from the proof to its hourly checkpoint. The
    checkpoint itself is at
    `https://verifyum.com/witness/checkpoints/hourly/<batch-id>.json` and the
    receipts at `https://verifyum.com/witness/receipts/<hourly|daily>/<batch-id>.json`.
-   The witness library recomputes the path. The receipts name what each
-   channel confirmed, with artifact digests and provider references.
+   `verify_witness` recomputes the path. The receipts name what each channel
+   confirmed, with artifact digests and provider references.
 
 5. **The independent records.** Four can be checked with no help from
    Verifyum. OpenTimestamps anchors the hourly checkpoint in a Bitcoin block.
    The daily checkpoint is timestamped by a qualified timestamp authority on
    the EU Trusted List over RFC 3161. The same daily checkpoint is a leaf in
    the Sigsum log at `https://seasalp.glasklar.is`, cosigned by at least two
-   of three pinned witnesses. Each daily checkpoint gets one certificate whose
-   hostname encodes its root, visible in Certificate Transparency logs. The
-   GitHub checkpoint log, its Software Heritage mirror and the Internet
+   of three pinned witnesses; `sigsum_checksum` in the clients computes the
+   leaf checksum to look for. Each daily checkpoint gets one certificate
+   whose hostname encodes its root, visible in Certificate Transparency logs.
+   The GitHub checkpoint log, its Software Heritage mirror and the Internet
    Archive capture are Verifyum's own records. They add durability, not
    independence, and the site says so.
 
@@ -108,6 +145,16 @@ anchor. The qualified timestamp carries a statutory presumption under eIDAS
 Article 41(2) for the checkpoint root only. The step from the root to a file
 is shown by the Merkle path like any other technical fact, so a proof is
 never itself a qualified timestamp.
+
+## Known limitations of the ports
+
+The ports implement the hash rules and the signature check. They do not
+implement the reference's field-level validation of documents (exact key
+sets, canonical time round-trips, period arithmetic); a document that hashes
+correctly but is malformed in another way is caught by the reference, not by
+a port. The Rust parser keeps the last of duplicate object keys where the
+reference rejects the document; no published document has duplicate keys.
+The Python signature check depends on the optional `cryptography` package.
 
 ## What a proof does not show
 
