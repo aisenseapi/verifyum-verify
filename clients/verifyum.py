@@ -29,6 +29,7 @@ import urllib.request
 __all__ = ["commitment_for", "anchor_bytes", "anchor_file", "anchor_record", "verify", "VerifyumError"]
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
+PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
 USER_AGENT = "verifyum-python/1.0"
 
 
@@ -145,7 +146,7 @@ def verify(proof_id: str, data: bytes, draft: dict) -> dict:
         + hashlib.sha256(b"verifyum:commitment:v2\n" + _canonical(manifest)).hexdigest()
         == draft["commitment"],
     }
-    metadata = _request("GET", f"https://{proof_id}.verifyum.com/.well-known/verifyum.json")["body"]
+    metadata = _request("GET", f"https://{proof_id}.{PROOF_DOMAIN}/.well-known/verifyum.json")["body"]
     checks["public_commitment_matches"] = metadata.get("commitment") == draft["commitment"]
     checks["anchor_finalized"] = metadata.get("anchor", {}).get("status") == "finalized"
     return {

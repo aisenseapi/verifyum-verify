@@ -18,6 +18,7 @@
  */
 
 const API_BASE = globalThis.process?.env?.VERIFYUM_API_BASE ?? "https://api.verifyum.com";
+const PROOF_DOMAIN = globalThis.process?.env?.VERIFYUM_PROOF_DOMAIN ?? "verifyum.com";
 const USER_AGENT = "verifyum-js/1.0";
 const PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
 
@@ -160,7 +161,7 @@ export async function verify(proofId, data, draft) {
     sizeMatches: String(bytes.length) === manifest.file.size,
     commitmentMatches: `sha256:${await sha256(input)}` === draft.commitment,
   };
-  const metadata = await request("GET", `https://${proofId}.verifyum.com/.well-known/verifyum.json`);
+  const metadata = await request("GET", `https://${proofId}.${PROOF_DOMAIN}/.well-known/verifyum.json`);
   checks.publicCommitmentMatches = metadata.commitment === draft.commitment;
   checks.anchorFinalized = metadata.anchor?.status === "finalized";
 

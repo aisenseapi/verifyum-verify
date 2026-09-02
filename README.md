@@ -59,6 +59,9 @@ commitment from the bytes and the draft and compares it with the public
 record. The draft holds the nonce. Without it nobody, including Verifyum, can
 link the file to the proof.
 
+Both clients read `VERIFYUM_API_BASE` and `VERIFYUM_PROOF_DOMAIN` from the
+environment, so they can be pointed at another deployment for testing.
+
 ## Verify a proof without Verifyum
 
 A proof is public at `https://proof.verifyum.com/<proof-id>` and as JSON at
