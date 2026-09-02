@@ -35,13 +35,14 @@ then checked against it line by line. A port in any language starts there.
 | `clients/verifyum.py` | Python 3.10+, standard library only. Anchors, verifies, and checks a proof against its witnesses |
 | `clients/verifyum.mjs` | Node 20+, no dependencies. Same |
 | `clients/rust/` | Rust library and check binary, pinned crates |
+| `clients/go/` | Go 1.22+, standard library only |
 | `clients/verifyum-protocol.js` | The browser implementation of the commitment |
+| `checks/check.sh` | A shell verifier: coreutils, xxd, jq and openssl, no language runtime |
 | `checks/` | The check programs, the live vectors they must reproduce, and the PHP oracle |
 | `schemas/` | JSON Schemas for proofs, manifests, checkpoints, memberships and receipts |
 
-Go and a bash-only verifier exist as drafts and are not in this repository:
-neither has been executed here, and an unexecuted port has no place in a
-repository whose purpose is verification.
+Every implementation here has been executed and compared with the reference.
+Nothing is shipped from a desk check alone.
 
 ## Run the checks
 
@@ -53,10 +54,15 @@ files themselves, so the working directory does not matter.
     php checks/oracle.php
     python checks/check.py
     node checks/check.mjs
+    bash checks/check.sh
     cargo run --manifest-path clients/rust/Cargo.toml --release --bin check
+    go run -C clients/go ./cmd/check
 
-`checks/oracle.php` is the PHP reference computing the same values; the three
-ports must be byte-identical to it. `checks/vectors/EXPECTED.md` lists the
+`checks/oracle.php` is the PHP reference computing the same values; the five
+ports must be byte-identical to it. On publication all six agreed byte for
+byte, and each rejected six separate corruptions of the vectors: an altered
+path hash, a flipped path side, an altered hourly checkpoint hash, an altered
+daily Merkle root, a tampered signature and altered proof metadata. `checks/vectors/EXPECTED.md` lists the
 values. The vectors are a real public proof and the checkpoints it belongs
 to, fetched from the live service, so a change in any rule shows up as a
 mismatch against a record that also lives in Bitcoin, a qualified timestamp,
@@ -64,7 +70,9 @@ a Sigsum log and Certificate Transparency.
 
 The Python check needs the `cryptography` package for the signature line;
 without it that line reads `unchecked` and the rest still runs. The PHP
-oracle needs the sodium extension.
+oracle needs the sodium extension. The shell verifier needs jq 1.6 or newer
+and an OpenSSL with Ed25519 support, which means OpenSSL 1.1.1 or newer; on
+macOS replace `sha256sum` with `shasum -a 256`.
 
 ## Use the clients
 
@@ -153,9 +161,12 @@ The ports implement the hash rules and the signature check. They do not
 implement the reference's field-level validation of documents (exact key
 sets, canonical time round-trips, period arithmetic); a document that hashes
 correctly but is malformed in another way is caught by the reference, not by
-a port. The Rust parser keeps the last of duplicate object keys where the
+a port. The Rust and Go parsers keep the last of duplicate object keys where the
 reference rejects the document; no published document has duplicate keys.
 The Python signature check depends on the optional `cryptography` package.
+The shell verifier canonicalizes with `jq -cS`, which matches the reference
+on the documents published here but is not a general RFC 8785 encoder: it
+would differ on very large integers and on lone surrogates.
 
 ## What a proof does not show
 
