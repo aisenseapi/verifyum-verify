@@ -45,8 +45,9 @@ repository whose purpose is verification.
 
 ## Run the checks
 
-From the repository root. Every program prints the same eleven lines, one
-value per line, and exits 0 only if every value matches the live records.
+Every program prints the same eleven lines, one value per line, and exits 0
+only if every value matches the live records. Paths are resolved from the
+files themselves, so the working directory does not matter.
 
     php tools/check-protocol.php
     php checks/oracle.php

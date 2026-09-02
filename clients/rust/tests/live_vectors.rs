@@ -6,7 +6,7 @@ use sha2::{Digest as _, Sha256};
 use std::path::PathBuf;
 use verifyum::*;
 
-const DEFAULT_VECTORS: &str = "checks/vectors";
+const DEFAULT_VECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../checks/vectors");
 
 fn load(name: &str) -> (Vec<u8>, Value) {
     let dir = PathBuf::from(std::env::var_os("VERIFYUM_VECTORS").unwrap_or_else(|| DEFAULT_VECTORS.into()));
