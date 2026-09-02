@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/manifest-v2.json",
+  "title": "Verifyum private manifest version 2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["file", "nonce", "protocol", "version"],
+  "properties": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hash", "size"],
+      "properties": {
+        "hash": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "value"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "value": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        },
+        "size": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }
+      }
+    },
+    "nonce": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 2 }
+  }
+}

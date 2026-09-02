@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-channel-receipt-v1.json",
+  "title": "Verifyum Witness Layer channel receipt version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "network",
+    "checkpoint_kind",
+    "checkpoint_hash",
+    "channel",
+    "state",
+    "attempt",
+    "observed_at",
+    "subject_digest",
+    "artifacts",
+    "provider_reference",
+    "reason",
+    "previous_receipt_hash",
+    "receipt_hash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-channel-receipt-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "network": { "enum": ["devnet", "mainnet-beta"] },
+    "checkpoint_kind": { "enum": ["hourly", "daily"] },
+    "checkpoint_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "channel": {
+      "enum": [
+        "opentimestamps",
+        "github",
+        "wayback",
+        "certificate-transparency",
+        "eidas-timestamp",
+        "software-heritage",
+        "sigsum"
+      ]
+    },
+    "state": {
+      "enum": ["pending", "confirmed", "unavailable", "failed"]
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "subject_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "digest", "media_type", "reference"],
+        "properties": {
+          "kind": {
+            "enum": [
+              "opentimestamps-receipt",
+              "github-commit",
+              "wayback-capture",
+              "x509-leaf-certificate",
+              "x509-issuing-chain",
+              "ct-signed-certificate-timestamp",
+              "ct-inclusion-proof",
+              "ct-signed-tree-head",
+              "rfc3161-timestamp-token",
+              "rfc3161-trust-chain",
+              "software-heritage-snapshot",
+              "sigsum-leaf",
+              "sigsum-cosigned-tree-head",
+              "sigsum-inclusion-proof",
+              "sigsum-trust-policy"
+            ]
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "media_type": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$"
+          },
+          "reference": {
+            "oneOf": [
+              { "type": "string", "minLength": 1, "maxLength": 2048 },
+              { "type": "null" }
+            ]
+          }
+        }
+      }
+    },
+    "provider_reference": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "maxLength": 2048 },
+        { "type": "null" }
+      ]
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "enum": [
+            "pending-confirmation",
+            "provider-unavailable",
+            "provider-refused",
+            "invalid-response",
+            "local-error"
+          ]
+        },
+        { "type": "null" }
+      ]
+    },
+    "previous_receipt_hash": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "receipt_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "channel": {
+            "enum": ["opentimestamps", "github", "wayback"]
+          }
+        },
+        "required": ["channel"]
+      },
+      "then": {
+        "properties": {
+          "checkpoint_kind": { "const": "hourly" }
+        }
+      },
+      "else": {
+        "properties": {
+          "checkpoint_kind": { "const": "daily" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "state": { "const": "confirmed" } },
+        "required": ["state"]
+      },
+      "then": {
+        "properties": {
+          "reason": { "type": "null" },
+          "artifacts": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "attempt": { "const": 1 } },
+        "required": ["attempt"]
+      },
+      "then": {
+        "properties": {
+          "previous_receipt_hash": { "type": "null" }
+        }
+      }
+    }
+  ]
+}

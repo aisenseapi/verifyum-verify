@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/proof-v2.json",
+  "title": "Verifyum public proof version 2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "proof_id",
+    "commitment",
+    "submitted_at",
+    "anchor",
+    "service_signature"
+  ],
+  "properties": {
+    "schema": { "const": "https://verifyum.com/schema/proof-v2.json" },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 2 },
+    "proof_id": {
+      "type": "string",
+      "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$"
+    },
+    "commitment": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "submitted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "network",
+        "transaction_signature",
+        "slot",
+        "block_time",
+        "anchor_address",
+        "memo",
+        "status"
+      ],
+      "properties": {
+        "provider": { "const": "solana" },
+        "network": { "enum": ["devnet", "mainnet-beta"] },
+        "transaction_signature": {
+          "type": "string",
+          "minLength": 80,
+          "maxLength": 90,
+          "pattern": "^[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "slot": { "type": "integer", "minimum": 0 },
+        "block_time": {
+          "oneOf": [
+            { "type": "string", "format": "date-time" },
+            { "type": "null" }
+          ]
+        },
+        "anchor_address": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 44,
+          "pattern": "^[1-9A-HJ-NP-Za-km-z]+$"
+        },
+        "memo": {
+          "type": "string",
+          "pattern": "^verifyum:v2:id=[0-7][0-9a-hjkmnp-tv-z]{25};alg=sha256;commitment=[0-9a-f]{64}$"
+        },
+        "status": { "const": "finalized" }
+      }
+    },
+    "service_signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": { "const": "ed25519" },
+        "key_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  }
+}

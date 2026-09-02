@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-checkpoint-v1.json",
+  "title": "Verifyum Witness Layer checkpoint version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "kind",
+    "network",
+    "period_start",
+    "period_end",
+    "created_at",
+    "algorithm",
+    "subject_type",
+    "subject_count",
+    "merkle_root",
+    "previous_checkpoint_hash",
+    "checkpoint_hash"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-checkpoint-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "kind": { "enum": ["hourly", "daily"] },
+    "network": { "enum": ["devnet", "mainnet-beta"] },
+    "period_start": { "type": "string", "format": "date-time" },
+    "period_end": { "type": "string", "format": "date-time" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "algorithm": { "const": "verifyum-sha256-merkle-v1" },
+    "subject_type": {
+      "enum": ["proof-v2", "hourly-checkpoint-v1"]
+    },
+    "subject_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "merkle_root": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "previous_checkpoint_hash": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        { "type": "null" }
+      ]
+    },
+    "checkpoint_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "kind": { "const": "hourly" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "subject_type": { "const": "proof-v2" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "kind": { "const": "daily" } },
+        "required": ["kind"]
+      },
+      "then": {
+        "properties": {
+          "subject_type": { "const": "hourly-checkpoint-v1" }
+        }
+      }
+    }
+  ]
+}

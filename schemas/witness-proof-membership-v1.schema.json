@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-proof-membership-v1.json",
+  "title": "Verifyum public proof membership version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "network",
+    "proof_id",
+    "checkpoint_url",
+    "checkpoint",
+    "membership"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-proof-membership-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "network": { "enum": ["devnet", "mainnet-beta"] },
+    "proof_id": {
+      "type": "string",
+      "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$"
+    },
+    "checkpoint_url": {
+      "type": "string",
+      "pattern": "^https://verifyum\\.com/witness/checkpoints/hourly/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\\.json$"
+    },
+    "checkpoint": {
+      "$ref": "https://verifyum.com/schema/witness-checkpoint-v1.json"
+    },
+    "membership": {
+      "$ref": "https://verifyum.com/schema/witness-membership-v1.json"
+    }
+  }
+}

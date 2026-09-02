@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/agent-decision-record-v1.json",
+  "title": "Verifyum agent decision record version 1",
+  "description": "A recommended shape for the private document an autonomous system seals when it wants a tamper-evident record of one decision. Verifyum never receives this document. Only the domain-separated commitment over its exact bytes is anchored. The schema is advisory: any document can be anchored, and this shape exists so records stay comparable across tools.",
+  "type": "object",
+  "required": ["type", "version", "recorded_at", "agent", "model", "output"],
+  "properties": {
+    "type": { "const": "agent-decision-record" },
+    "version": { "const": 1 },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When the record was assembled, in UTC. This is local system time and is not itself evidence. The Solana block time is the evidenced time."
+    },
+    "agent": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "version": { "type": "string", "maxLength": 100 },
+        "operator": { "type": "string", "maxLength": 200 },
+        "run_id": { "type": "string", "maxLength": 200 }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["model"],
+      "properties": {
+        "provider": { "type": "string", "maxLength": 100 },
+        "model": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "temperature": { "type": "number" },
+        "top_p": { "type": "number" },
+        "max_tokens": { "type": "integer" },
+        "seed": { "type": "integer" },
+        "parameters": {
+          "type": "object",
+          "description": "Any further sampling or runtime parameters that were in effect."
+        }
+      }
+    },
+    "system_instructions": {
+      "type": "string",
+      "description": "The exact system prompt. Use system_instructions_digest instead when the text is confidential even inside the record."
+    },
+    "system_instructions_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "input": {
+      "type": "object",
+      "description": "The exact request the agent acted on. Large or sensitive context may be referenced by digest rather than embedded.",
+      "properties": {
+        "prompt": { "type": "string" },
+        "prompt_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "context_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "source": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "description": "Tool or function calls made while reaching the decision, in order.",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "arguments": { "type": "object" },
+          "arguments_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "result_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "called_at": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "description": "What the agent decided or produced.",
+      "properties": {
+        "decision": { "type": "string" },
+        "rationale": { "type": "string" },
+        "action": { "type": "string" },
+        "content_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    },
+    "previous_record_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Digest of the previous record, forming a local hash chain. Anchor the chain head periodically instead of every record when volume is high."
+    },
+    "notes": { "type": "string", "maxLength": 4000 }
+  },
+  "$comment": "Serialize this document deterministically before hashing, for example with RFC 8785 JSON Canonicalization, so the same record always produces the same commitment. An anchored record evidences that these exact bytes existed no later than the Solana block time and have not changed since. It does not evidence that the agent actually ran with these parameters, because the record is written by the agent's own system."
+}

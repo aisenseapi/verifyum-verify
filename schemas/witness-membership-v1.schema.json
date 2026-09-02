@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-membership-v1.json",
+  "title": "Verifyum Witness Layer membership version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "checkpoint_kind",
+    "checkpoint_hash",
+    "subject_type",
+    "subject_id",
+    "leaf_hash",
+    "leaf_index",
+    "leaf_count",
+    "path"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-membership-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "checkpoint_kind": { "enum": ["hourly", "daily"] },
+    "checkpoint_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "subject_type": {
+      "enum": ["proof-v2", "hourly-checkpoint-v1"]
+    },
+    "subject_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 71
+    },
+    "leaf_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "leaf_index": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "leaf_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "path": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["side", "hash"],
+        "properties": {
+          "side": { "enum": ["left", "right"] },
+          "hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "checkpoint_kind": { "const": "hourly" } },
+        "required": ["checkpoint_kind"]
+      },
+      "then": {
+        "properties": {
+          "subject_type": { "const": "proof-v2" },
+          "subject_id": {
+            "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "checkpoint_kind": { "const": "daily" } },
+        "required": ["checkpoint_kind"]
+      },
+      "then": {
+        "properties": {
+          "subject_type": { "const": "hourly-checkpoint-v1" },
+          "subject_id": {
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/anchor-request-v2.json",
+  "title": "Verifyum anchor request version 2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["commitment"],
+  "properties": {
+    "commitment": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._~-]+$"
+    }
+  }
+}
