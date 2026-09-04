@@ -57,6 +57,14 @@ func Parse(raw []byte) (any, error) {
 	if !utf8.Valid(raw) {
 		return nil, errors.New("document is not valid UTF-8")
 	}
+	// encoding/json keeps the last of duplicate object keys, where the
+	// reference rejects the document. Saying "no published document has
+	// duplicates" is an argument about today's data, not about an adversary,
+	// and two verifiers that disagree on hostile input are worse than one.
+	// The token walk below is a separate pass so the decode stays ordinary.
+	if err := rejectDuplicateKeys(raw); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var v any
@@ -71,6 +79,58 @@ func Parse(raw []byte) (any, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// rejectDuplicateKeys walks the token stream and fails on the first object
+// that names a key twice, at any depth.
+func rejectDuplicateKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	return walkForDuplicates(dec)
+}
+
+func walkForDuplicates(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		// A malformed document is the decoder's error to report, not ours.
+		return nil
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return nil
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil
+			}
+			if _, repeated := seen[key]; repeated {
+				return fmt.Errorf("duplicate object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := walkForDuplicates(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token()
+		_ = err
+	case '[':
+		for dec.More() {
+			if err := walkForDuplicates(dec); err != nil {
+				return err
+			}
+		}
+		_, err := dec.Token()
+		_ = err
+	}
+	return nil
 }
 
 // ParseObject is Parse restricted to a top-level object.
