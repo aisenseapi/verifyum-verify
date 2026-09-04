@@ -630,6 +630,160 @@ export async function verifyWitness(proofId, { registryUrl = REGISTRY_URL } = {}
 }
 
 // ---------------------------------------------------------------------------
+// Self-bearing receipts
+//
+// A receipt used to hold the nonce and a proof id and nothing else, so the
+// holder depended on our uptime for the life of the claim. It now carries the
+// signed metadata, the witness bundle with its Merkle path, and the key
+// registry: about three kilobytes, after which no request to us is needed.
+//
+// The bundle is read from the same .well-known document the Python client
+// takes from the API; the two were compared byte for byte, so a receipt
+// written by either client checks with the other.
+// ---------------------------------------------------------------------------
+
+export const RECEIPT_VERSION = 3;
+
+const SOLANA_RPC = globalThis.process?.env?.VERIFYUM_SOLANA_RPC ?? "https://api.mainnet-beta.solana.com";
+
+const MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+
+/** Everything a receipt needs to be checkable without us. */
+export async function fetchEvidence(proofId) {
+  const base = `https://${proofId}.${PROOF_DOMAIN}`;
+  const evidence = {};
+  const collect = async (name, url) => {
+    try { evidence[name] = parseDocument(await fetchBytes(url)); }
+    catch { /* absent for now; upgrade fills it in */ }
+  };
+  await collect("metadata", `${base}/.well-known/verifyum.json`);
+  await collect("witness_bundle", `${base}/.well-known/verifyum-witnesses.json`);
+  await collect("service_keys", REGISTRY_URL);
+  return evidence;
+}
+
+/** True when the receipt can be checked with no network at all. */
+export function receiptIsComplete(receipt) {
+  return ["metadata", "witness_bundle", "service_keys"].every(
+    (part) => receipt?.[part] !== null && typeof receipt?.[part] === "object"
+  );
+}
+
+/** The exact memo the anchor carries, rebuilt rather than trusted. */
+export function receiptMemo(metadata) {
+  return buildMemo(metadata.proof_id, metadata.commitment);
+}
+
+/**
+ * Checks a file against a complete receipt without contacting anyone.
+ *
+ * Covers the local binding, the signed metadata, the Merkle path into the
+ * checkpoint and the service signature. It cannot cover the ledger; for that
+ * see verifyIndependent.
+ */
+export async function verifyOffline(data, receipt) {
+  if (!receiptIsComplete(receipt)) {
+    throw new VerifyumError("receipt does not carry its evidence yet; run `verifyum upgrade` while online");
+  }
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const draft = receipt.private_draft;
+  const manifest = draft.manifest;
+  const metadata = receipt.metadata;
+
+  const canonical = new TextEncoder().encode(canonicalize(manifest));
+  const input = new Uint8Array(PREFIX.length + canonical.length);
+  input.set(PREFIX, 0);
+  input.set(canonical, PREFIX.length);
+
+  const checks = {
+    hash_matches: createHash("sha256").update(bytes).digest("hex") === manifest.file.hash.value,
+    size_matches: String(bytes.length) === manifest.file.size,
+    commitment_matches: "sha256:" + createHash("sha256").update(input).digest("hex") === draft.commitment,
+    metadata_commitment_matches: metadata.commitment === draft.commitment,
+    anchor_finalized: metadata.anchor?.status === "finalized",
+  };
+
+  const witness = verifyWitnessDocuments({
+    proofId: metadata.proof_id,
+    metadata,
+    bundle: receipt.witness_bundle,
+    registry: receipt.service_keys,
+  });
+  Object.assign(checks, witness.checks);
+  delete checks.subject_id;
+  checks.memo_matches = metadata.anchor?.memo === receiptMemo(metadata);
+
+  return {
+    valid: Object.values(checks).every((value) => value === true),
+    checks,
+    transaction_signature: metadata.anchor?.transaction_signature ?? null,
+    network: metadata.anchor?.network ?? null,
+    offline: true,
+  };
+}
+
+/**
+ * Reads the anchor from a public Solana RPC and compares the memo itself.
+ *
+ * Nothing here touches verifyum.com: the ledger answers, not the operator.
+ */
+export async function verifyIndependent(receipt, { rpcUrl = SOLANA_RPC } = {}) {
+  const metadata = receipt?.metadata;
+  if (!metadata || typeof metadata !== "object") {
+    throw new VerifyumError("receipt does not carry its metadata; run `verifyum upgrade` while online");
+  }
+  const signature = metadata.anchor?.transaction_signature;
+  if (typeof signature !== "string") {
+    throw new VerifyumError("receipt carries no transaction signature");
+  }
+
+  let answer;
+  try {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "User-Agent": USER_AGENT },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "getTransaction",
+        params: [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
+      }),
+    });
+    answer = await response.json();
+  } catch (error) {
+    throw new VerifyumError(`could not reach the Solana RPC: ${error.message}`);
+  }
+  if (answer?.error) {
+    throw new VerifyumError("Solana RPC refused: " + String(answer.error.message));
+  }
+
+  const result = answer?.result;
+  const checks = { transaction_found: result !== null && typeof result === "object" };
+  let observed = null;
+  if (checks.transaction_found) {
+    checks.transaction_succeeded = (result.meta?.err ?? null) === null;
+    for (const instruction of result.transaction?.message?.instructions ?? []) {
+      if (instruction?.program === "spl-memo" || instruction?.programId === MEMO_PROGRAM) {
+        if (typeof instruction.parsed === "string") { observed = instruction.parsed; break; }
+      }
+    }
+    checks.memo_present = typeof observed === "string";
+    checks.memo_matches_receipt = observed === receiptMemo(metadata);
+    const address = metadata.anchor?.anchor_address;
+    checks.anchor_address_matches = typeof address !== "string" || (
+      result.transaction?.message?.accountKeys ?? []
+    ).some((account) => account?.signer && account.pubkey === address);
+  }
+  return {
+    valid: Object.values(checks).every((value) => value === true),
+    checks,
+    transaction_signature: signature,
+    memo: observed,
+    block_time: result?.blockTime ?? null,
+    source: rpcUrl,
+  };
+}
+
+
+// ---------------------------------------------------------------------------
 // Command line
 //
 // The receipt sits beside the file as <file>.verifyum.json, the way an .ots
@@ -658,17 +812,18 @@ export function receiptPath(path) {
   return path + RECEIPT_SUFFIX;
 }
 
-async function writeReceipt(fs, path, proof) {
+async function writeReceipt(fs, path, proof, evidence) {
   const target = receiptPath(path);
   const document = {
     schema: "https://verifyum.com/schema/receipt-v1.json",
     protocol: "verifyum",
-    version: 2,
+    version: RECEIPT_VERSION,
     proof_id: proof.proof_id ?? null,
     commitment: proof.commitment ?? null,
     status: proof.status ?? null,
     proof_url: proof.proof_url ?? null,
     private_draft: proof.private_draft ?? null,
+    ...(evidence ?? {}),
   };
   const temporary = target + ".tmp";
   await fs.writeFile(temporary, JSON.stringify(document, Object.keys(document).sort(), 2) + "\n", { mode: 0o600 });
@@ -694,12 +849,15 @@ function usage() {
     "",
     "  stamp    anchor one or more files and write their receipts",
     "  verify   check files against their receipts and the public record",
+    "  upgrade  fetch the evidence a receipt needs to stand alone",
     "  witness  check a proof against the witness layer",
     "",
     "options:",
-    "  --json     machine readable output",
-    "  --force    replace an existing receipt (stamp)",
-    "  --no-wait  return as soon as the anchor is queued (stamp)",
+    "  --json         machine readable output",
+    "  --offline      check using the receipt alone, contacting no one (verify)",
+    "  --independent  also read the anchor from a public Solana RPC (verify)",
+    "  --force        replace an existing receipt (stamp, upgrade)",
+    "  --no-wait      return as soon as the anchor is queued (stamp)",
     "",
     "The receipt beside each file holds the nonce. Verifyum never has it, so a",
     "lost receipt cannot be recovered from us or from anyone. Treat it like a",
@@ -718,7 +876,7 @@ export async function main(argv) {
 
   if (!command || command === "--help" || command === "-h") { usage(); return EXIT_USAGE; }
   if (command === "--version") { process.stdout.write(USER_AGENT.split("/").pop() + "\n"); return EXIT_OK; }
-  if (!["stamp", "verify", "witness"].includes(command)) {
+  if (!["stamp", "verify", "upgrade", "witness"].includes(command)) {
     process.stderr.write("verifyum: unknown command " + command + "\n");
     return EXIT_USAGE;
   }
@@ -737,7 +895,8 @@ export async function main(argv) {
           try { await fs.access(receiptPath(target)); fail(EXIT_USAGE, "receipt already exists, use --force to replace: " + receiptPath(target)); continue; } catch { /* absent, good */ }
         }
         const proof = await anchorFile(target, { wait: !flags.has("--no-wait") });
-        const written = await writeReceipt(fs, target, proof);
+        const evidence = proof.proof_id ? await fetchEvidence(proof.proof_id) : {};
+        const written = await writeReceipt(fs, target, proof, evidence);
         emit(
           { file: target, receipt: written, proof_id: proof.proof_id, status: proof.status, proof_url: proof.proof_url },
           asJson,
@@ -762,7 +921,17 @@ export async function main(argv) {
       try {
         const receipt = await readReceipt(fs, target);
         const data = await fs.readFile(target);
-        const result = await verify(receipt.proof_id, data, receipt.private_draft);
+        const result = flags.has("--offline")
+          ? await verifyOffline(data, receipt)
+          : await verify(receipt.proof_id, data, receipt.private_draft);
+        if (flags.has("--independent")) {
+          const chain = await verifyIndependent(receipt);
+          for (const [name, value] of Object.entries(chain.checks)) {
+            result.checks["chain_" + name] = value;
+          }
+          result.valid = result.valid && chain.valid;
+          result.chain_source = chain.source;
+        }
         if (!result.valid) { worst = Math.max(worst, EXIT_FAILED); }
         const failed = Object.entries(result.checks).filter(([, ok]) => !ok).map(([name]) => name);
         emit(
@@ -774,6 +943,29 @@ export async function main(argv) {
             "  chain   " + (result.transaction_signature ?? "-"),
           ].concat(failed.length ? ["  failed  " + failed.join(", ")] : [])
         );
+      } catch (error) {
+        fail(error instanceof VerifyumError ? EXIT_UNAVAILABLE : EXIT_USAGE, error.message);
+      }
+      continue;
+    }
+
+    if (command === "upgrade") {
+      try {
+        const receipt = await readReceipt(fs, target);
+        if (receiptIsComplete(receipt) && !flags.has("--force")) {
+          emit({ file: target, upgraded: false, self_bearing: true }, asJson, ["already complete  " + target]);
+          continue;
+        }
+        const merged = { ...receipt, ...(await fetchEvidence(receipt.proof_id)), version: RECEIPT_VERSION };
+        const temporary = receiptPath(target) + ".tmp";
+        await fs.writeFile(temporary, JSON.stringify(merged, null, 2) + "\n", { mode: 0o600 });
+        await fs.rename(temporary, receiptPath(target));
+        const complete = receiptIsComplete(merged);
+        if (!complete) { worst = Math.max(worst, EXIT_UNAVAILABLE); }
+        emit({ file: target, upgraded: true, self_bearing: complete }, asJson,
+          [(complete ? "upgraded " : "still incomplete ") + target,
+           complete ? "  this receipt now checks offline"
+                    : "  the witness bundle is not published yet; try again after the hour"]);
       } catch (error) {
         fail(error instanceof VerifyumError ? EXIT_UNAVAILABLE : EXIT_USAGE, error.message);
       }

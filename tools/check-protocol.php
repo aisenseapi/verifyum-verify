@@ -100,10 +100,12 @@ $check(
 // SHA-256 implementation still settle the question. The check runs with
 // every outbound call rigged to raise, so a pass cannot come from being
 // online.
+$python_result_file = sys_get_temp_dir() .'/verifyum-offline-'. bin2hex( random_bytes( 6 ) ) .'.json';
 $offline = json_decode( trim( (string)shell_exec(
     'python '. escapeshellarg( __DIR__ .'/check-offline.py' )
     .' '. escapeshellarg( dirname( __DIR__ ) .'/static/client-verifyum.py' )
-    .' '. escapeshellarg( __DIR__ .'/fixtures/self-bearing-receipt.json' ) .' 2>&1'
+    .' '. escapeshellarg( __DIR__ .'/fixtures/self-bearing-receipt.json' )
+    .' '. escapeshellarg( $python_result_file ) .' 2>&1'
 ) ), true );
 $check(
     is_array( $offline ) and ( $offline['ran_without_network'] ?? false ) === true,
@@ -125,6 +127,32 @@ $check(
     is_array( $offline ) and ( $offline['memo_rebuilds'] ?? false ) === true
         and ( $offline['memo_is_128_bytes'] ?? false ) === true,
     'the anchor memo rebuilds from the receipt at the fixed 128 bytes'
+);
+
+// A receipt is only self-bearing if the other client can use it. The two
+// witness verifiers name their checks differently, which is a difference in
+// the convenience layer and not in the protocol, so what is asserted is the
+// verdict and every check they both name.
+$parity = json_decode( trim( (string)shell_exec(
+    'node '. escapeshellarg( __DIR__ .'/check-parity.mjs' )
+    .' '. escapeshellarg( dirname( __DIR__ ) .'/static/client-verifyum.mjs' )
+    .' '. escapeshellarg( __DIR__ .'/fixtures/self-bearing-receipt.json' )
+    .' '. escapeshellarg( $python_result_file ) .' 2>&1'
+) ), true );
+@unlink( $python_result_file );
+$check(
+    is_array( $parity ) and ( $parity['same_verdict'] ?? false ) === true,
+    'the Python and Node clients reach the same verdict on the same receipt'
+);
+$check(
+    is_array( $parity ) and ( $parity['disagreements'] ?? null ) === []
+        and ( $parity['shared_checks'] ?? 0 ) >= 8,
+    'they agree on every check they both name, and there are at least eight'
+);
+$check(
+    is_array( $parity ) and ( $parity['witness_half_passes'] ?? false ) === true
+        and ( $parity['wrong_file_rejected'] ?? false ) === true,
+    'the Node client checks the witness half offline and still refuses the wrong file'
 );
 
 if ( $failures === [] ){
