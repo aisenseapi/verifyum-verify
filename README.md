@@ -32,8 +32,10 @@ then checked against it line by line. A port in any language starts there.
 | `libs/func_verifyum_witness.php` | Reference: Witness Layer v1, checkpoints, Merkle trees, membership, receipts |
 | `libs/func_verifyum_services.php` | The four helpers the witness library needs, copied verbatim from the private services library |
 | `tools/check-protocol.php` | Deterministic checks of the protocol against fixed vectors |
-| `clients/verifyum.py` | Python 3.10+, standard library only. Anchors, verifies, and checks a proof against its witnesses |
-| `clients/verifyum.mjs` | Node 20+, no dependencies. Same |
+| `clients/verifyum.py` | Python 3.10+, standard library only. A command and a library |
+| `clients/verifyum.mjs` | Node 20+, no dependencies. A command and a library |
+| `clients/python/`, `clients/node/` | The same two files, packaged for pip and npm |
+| `action.yml` | A GitHub action that stamps files in a workflow |
 | `clients/rust/` | Rust library and check binary, pinned crates |
 | `clients/go/` | Go 1.22+, standard library only |
 | `clients/verifyum-protocol.js` | The browser implementation of the commitment |
@@ -74,10 +76,38 @@ oracle needs the sodium extension. The shell verifier needs jq 1.6 or newer
 and an OpenSSL with Ed25519 support, which means OpenSSL 1.1.1 or newer; on
 macOS replace `sha256sum` with `shasum -a 256`.
 
-## Use the clients
+## Install
 
-The two single-file clients are libraries, not commands. Running them
-directly does nothing. Import them.
+    pip install verifyum
+    npx verifyum --help
+
+Both give the same command:
+
+    verifyum stamp contract.pdf
+    verifyum verify contract.pdf
+    verifyum witness contract.pdf
+
+`stamp` writes `contract.pdf.verifyum.json` beside the file, the way an
+`.ots` file sits beside its subject, so `verify` needs nothing but the
+original path. That receipt holds the nonce. It is the only thing tying your
+file to its public proof, Verifyum never has it, and losing it loses the
+link for good.
+
+Exit codes are meant for a pipeline: 0 all good, 1 a check failed, 2 usage
+or file error, 3 the service was unavailable and it is worth retrying.
+`--json` prints one machine-readable object per file.
+
+To stamp what a release publishes, the action in this repository does it in
+one step:
+
+    - uses: aisenseapi/verifyum-verify@main
+      with:
+        files: SHA256SUMS
+
+## Use them as libraries
+
+The same two files are libraries as well as commands. Importing one starts
+nothing.
 
 Python, from the `clients` directory or with it on `sys.path`:
 

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "verifyum"
+version = "1.1.0"
+description = "Prove that a file existed, unchanged, at a point in time. Standard library only."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [ { name = "AI SENSE AS", email = "post@aisense.no" } ]
+keywords = ["timestamping", "proof-of-existence", "notarization", "provenance", "solana", "transparency"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security :: Cryptography",
+  "Topic :: System :: Archiving",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://verifyum.com"
+Source = "https://github.com/aisenseapi/verifyum-verify"
+Documentation = "https://verifyum.com/agents"
+
+[project.scripts]
+verifyum = "verifyum:main"
+
+[tool.setuptools]
+py-modules = ["verifyum"]

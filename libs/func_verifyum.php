@@ -22,6 +22,11 @@ function verifyum_load_config( string $domain_dir ): array
         'witness_receipt_store' => '/var/lib/verifyum/witness-public-receipts',
         'announcement_store' => '/var/lib/verifyum/announcements',
         'm2m_log' => '/tmp/verifyum-m2m.log',
+        'stats_code' => '',
+        // Addresses whose requests are ours rather than a visitor's. Loopback
+        // is always ours; add the operator's own to keep testing out of the
+        // figures.
+        'activity_internal_addresses' => [ '127.0.0.1', '::1' ],
     ];
 
     $file = rtrim( $domain_dir, '/\\' ) .'/.verifyum-config.php';
@@ -383,4 +388,217 @@ function verifyum_metadata_request( string $socket_path, array $request, int $ti
         return [ 'ok'=>false, 'error'=>'metadata_service_invalid_response' ];
     }
     return $response;
+}
+
+/*
+ * The status page is behind a short code. That code is a curtain, not a
+ * lock: the checkpoints and receipts it counts are served publicly, so
+ * anyone determined enough can recompute every figure without it. What the
+ * gate does buy is that the page is not stumbled upon, and the attempt
+ * limiter keeps a four digit code from being walked through at machine
+ * speed.
+ */
+
+const VERIFYUM_STATS_SESSION_COOKIE = 'verifyum_stats';
+const VERIFYUM_STATS_SESSION_SECONDS = 43200;
+const VERIFYUM_STATS_MAX_ATTEMPTS = 5;
+const VERIFYUM_STATS_WINDOW_SECONDS = 900;
+const VERIFYUM_STATS_LOCK_SECONDS = 900;
+const VERIFYUM_STATS_MAX_TRACKED = 5000;
+
+/**
+ * The key that signs a status session. It is generated once and kept in a
+ * file so every worker signs alike. Losing it on a reboot only means the
+ * code has to be entered again, so there is nothing here worth protecting
+ * beyond making the cookie unforgeable.
+ */
+function verifyum_stats_session_key( string $path ): string
+{
+    if ( !is_link( $path ) and is_file( $path ) ){
+        $stored = @file_get_contents( $path );
+        if ( is_string( $stored ) and strlen( $stored ) === 64 ){
+            return $stored;
+        }
+    }
+    $key = bin2hex( random_bytes( 32 ) );
+    $directory = dirname( $path );
+    if ( is_dir( $directory ) and is_writable( $directory ) ){
+        $temporary = $directory .'/.'. basename( $path ) .'.tmp-'. bin2hex( random_bytes( 6 ) );
+        if ( file_put_contents( $temporary, $key ) === strlen( $key ) ){
+            @chmod( $temporary, 0600 );
+            if ( @rename( $temporary, $path ) ){
+                return $key;
+            }
+            @unlink( $temporary );
+        }
+    }
+    return $key;
+}
+
+function verifyum_stats_issue_session( string $key, int $expires_at ): string
+{
+    return $expires_at .'.'. hash_hmac( 'sha256', 'verifyum:stats:v1:'. $expires_at, $key );
+}
+
+function verifyum_stats_session_valid( ?string $cookie, string $key, ?int $now = null ): bool
+{
+    $now = $now ?? time();
+    if ( !is_string( $cookie ) or strlen( $cookie ) > 128 ){
+        return false;
+    }
+    $parts = explode( '.', $cookie, 2 );
+    if ( count( $parts ) !== 2 or preg_match( '/\A[0-9]{1,12}\z/', $parts[0] ) !== 1 ){
+        return false;
+    }
+    $expires_at = (int)$parts[0];
+    if ( $expires_at <= $now ){
+        return false;
+    }
+    return hash_equals( verifyum_stats_issue_session( $key, $expires_at ), $cookie );
+}
+
+/**
+ * Reads the attempt ledger. Addresses are stored as a keyed hash so the
+ * file never holds a readable address, which is what the privacy page
+ * promises about every other use of an address here.
+ */
+function verifyum_stats_read_attempts( string $path ): array
+{
+    if ( is_link( $path ) or !is_file( $path ) ){
+        return [];
+    }
+    $size = @filesize( $path );
+    if ( !is_int( $size ) or $size > 1048576 ){
+        return [];
+    }
+    $raw = @file_get_contents( $path );
+    $decoded = is_string( $raw ) ? json_decode( $raw, true ) : null;
+    return is_array( $decoded ) ? $decoded : [];
+}
+
+function verifyum_stats_client_key( string $client_ip, string $session_key ): string
+{
+    return substr( hash_hmac( 'sha256', 'verifyum:stats:client:'. $client_ip, $session_key ), 0, 32 );
+}
+
+/**
+ * Whether this client is currently locked out, and how long remains. A
+ * locked client is refused before the code is even compared, so a lockout
+ * cannot be used to learn whether a guess was right.
+ */
+function verifyum_stats_lock_remaining( array $attempts, string $client_key, ?int $now = null ): int
+{
+    $now = $now ?? time();
+    $entry = $attempts[ $client_key ] ?? null;
+    if ( !is_array( $entry ) ){
+        return 0;
+    }
+    $locked_until = (int)( $entry['locked_until'] ?? 0 );
+    return $locked_until > $now ? $locked_until - $now : 0;
+}
+
+/**
+ * Records one failed attempt and returns the updated ledger. Entries that
+ * are past both their window and their lock are dropped, so the file cannot
+ * grow without bound from casual traffic.
+ */
+function verifyum_stats_record_failure( array $attempts, string $client_key, ?int $now = null ): array
+{
+    $now = $now ?? time();
+    foreach ( $attempts as $key=>$entry ){
+        if ( !is_array( $entry ) ){
+            unset( $attempts[ $key ] );
+            continue;
+        }
+        $stale = (int)( $entry['first_failed_at'] ?? 0 ) + VERIFYUM_STATS_WINDOW_SECONDS;
+        $locked_until = (int)( $entry['locked_until'] ?? 0 );
+        if ( $stale < $now and $locked_until < $now ){
+            unset( $attempts[ $key ] );
+        }
+    }
+
+    $entry = $attempts[ $client_key ] ?? null;
+    $first = is_array( $entry ) ? (int)( $entry['first_failed_at'] ?? 0 ) : 0;
+    $count = is_array( $entry ) ? (int)( $entry['count'] ?? 0 ) : 0;
+    if ( $first === 0 or ( $first + VERIFYUM_STATS_WINDOW_SECONDS ) < $now ){
+        $first = $now;
+        $count = 0;
+    }
+    $count++;
+    $locked_until = $count >= VERIFYUM_STATS_MAX_ATTEMPTS ? $now + VERIFYUM_STATS_LOCK_SECONDS : 0;
+    $attempts[ $client_key ] = [
+        'count'=>$count,
+        'first_failed_at'=>$first,
+        'locked_until'=>$locked_until,
+    ];
+
+    // A flood from many addresses must not turn the ledger into a memory
+    // problem, so the oldest entries go first once the table is full.
+    if ( count( $attempts ) > VERIFYUM_STATS_MAX_TRACKED ){
+        uasort( $attempts, static function ( array $left, array $right ): int {
+            return (int)( $left['first_failed_at'] ?? 0 ) <=> (int)( $right['first_failed_at'] ?? 0 );
+        } );
+        $attempts = array_slice( $attempts, -VERIFYUM_STATS_MAX_TRACKED, null, true );
+    }
+    return $attempts;
+}
+
+function verifyum_stats_write_attempts( string $path, array $attempts ): void
+{
+    $encoded = json_encode( $attempts, JSON_UNESCAPED_SLASHES );
+    if ( !is_string( $encoded ) ){
+        return;
+    }
+    $directory = dirname( $path );
+    if ( !is_dir( $directory ) or !is_writable( $directory ) ){
+        return;
+    }
+    $temporary = $directory .'/.'. basename( $path ) .'.tmp-'. bin2hex( random_bytes( 6 ) );
+    if ( file_put_contents( $temporary, $encoded, LOCK_EX ) === strlen( $encoded ) ){
+        @chmod( $temporary, 0600 );
+        if ( !@rename( $temporary, $path ) ){
+            @unlink( $temporary );
+        }
+        return;
+    }
+    @unlink( $temporary );
+}
+
+/**
+ * Compares a submitted code with the configured one in constant time. The
+ * code is read as a string throughout, so a leading zero cannot be lost to
+ * an integer cast.
+ */
+function verifyum_stats_code_matches( string $submitted, string $expected ): bool
+{
+    // An unconfigured code opens for nobody. Shipping a working default
+    // would mean every install answers to whatever the repository says.
+    if ( preg_match( '/\A[0-9]{4,12}\z/', $expected ) !== 1 ){
+        return false;
+    }
+    if ( preg_match( '/\A[0-9]{4,12}\z/', $submitted ) !== 1 ){
+        return false;
+    }
+    return hash_equals( $expected, $submitted );
+}
+
+/**
+ * Renders the code prompt, with an optional message. The message is escaped
+ * because it reports what the visitor did, and a page that reflects input
+ * without escaping is how a status curtain becomes a hole.
+ */
+function verifyum_stats_locked_page( string $domain_dir, ?string $message ): string
+{
+    $path = rtrim( $domain_dir, '/\\' ) .'/static/stats-locked.html';
+    $page = @file_get_contents( $path );
+    if ( !is_string( $page ) ){
+        return "<!doctype html><title>Status</title><p>The status page is behind a code.";
+    }
+    $rendered = '';
+    if ( is_string( $message ) and $message !== '' ){
+        $rendered = '<p class="code-message" role="alert">'
+            . htmlspecialchars( $message, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8' )
+            . '</p>';
+    }
+    return str_replace( '<!--MESSAGE-->', $rendered, $page );
 }

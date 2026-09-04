@@ -1078,3 +1078,865 @@ function verifyum_witness_build_daily_checkpoint(
         $subjects
     );
 }
+
+/**
+ * The seven external channels, in the order the witness page presents them,
+ * and which tier each belongs to. A channel absent from this table is not
+ * reported at all, so a future channel has to be classified deliberately
+ * rather than appearing as an unlabelled row.
+ */
+const VERIFYUM_WITNESS_CHANNEL_TIERS = [
+    'opentimestamps'           => [ 'tier'=>'independent', 'kind'=>'hourly' ],
+    'eidas-timestamp'          => [ 'tier'=>'independent', 'kind'=>'daily' ],
+    'sigsum'                   => [ 'tier'=>'independent', 'kind'=>'daily' ],
+    'certificate-transparency' => [ 'tier'=>'independent', 'kind'=>'daily' ],
+    'github'                   => [ 'tier'=>'operator',    'kind'=>'hourly' ],
+    'wayback'                  => [ 'tier'=>'operator',    'kind'=>'hourly' ],
+    'software-heritage'        => [ 'tier'=>'operator',    'kind'=>'daily' ],
+];
+
+const VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES = 20000;
+
+/**
+ * Lists the batch ids present in one kind of a witness store, newest first.
+ * Batch ids begin with a UTC timestamp, so a reverse sort is chronological
+ * and no file has to be opened to order them.
+ */
+function verifyum_witness_list_batches( string $store, string $kind ): array
+{
+    if (
+        !in_array( $kind, [ 'hourly', 'daily' ], true )
+        or is_link( $store )
+        or !is_dir( $store )
+    ){
+        return [];
+    }
+    $directory = rtrim( $store, '/\\' ) .'/'. $kind;
+    if ( is_link( $directory ) or !is_dir( $directory ) ){
+        return [];
+    }
+    $entries = @scandir( $directory );
+    if ( !is_array( $entries ) ){
+        return [];
+    }
+    $batches = [];
+    foreach ( $entries as $entry ){
+        if ( preg_match( '/\A([0-9]{8}T[0-9]{6}Z-[0-9a-f]{64})\.json\z/', $entry, $match ) !== 1 ){
+            continue;
+        }
+        $batches[] = $match[1];
+    }
+    rsort( $batches, SORT_STRING );
+    return array_slice( $batches, 0, VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES );
+}
+
+/**
+ * Whole minutes between two ISO 8601 instants, or null when either is
+ * missing or unparseable. Used for the delay between a checkpoint being
+ * made and a channel confirming it.
+ */
+function verifyum_witness_minutes_between( ?string $from, ?string $to ): ?int
+{
+    if ( !is_string( $from ) or !is_string( $to ) ){
+        return null;
+    }
+    $start = strtotime( $from );
+    $end = strtotime( $to );
+    if ( $start === false or $end === false or $end < $start ){
+        return null;
+    }
+    return (int)floor( ( $end - $start ) / 60 );
+}
+
+function verifyum_witness_median( array $values ): ?int
+{
+    if ( $values === [] ){
+        return null;
+    }
+    sort( $values, SORT_NUMERIC );
+    $middle = (int)floor( count( $values ) / 2 );
+    if ( count( $values ) % 2 === 1 ){
+        return (int)$values[ $middle ];
+    }
+    return (int)floor( ( $values[ $middle - 1 ] + $values[ $middle ] ) / 2 );
+}
+
+/**
+ * Counts what the Witness Layer has actually done, from the same files the
+ * public checkpoint and receipt endpoints serve. Nothing here reads a proof
+ * or a membership, so the result can never carry a proof id: the figures
+ * describe checkpoints and channels only.
+ */
+function verifyum_witness_public_statistics(
+    string $checkpoint_store,
+    string $receipt_store,
+    string $network,
+    ?int $now = null
+): array {
+    $now = $now ?? time();
+
+    $channels = [];
+    foreach ( VERIFYUM_WITNESS_CHANNEL_TIERS as $name=>$meta ){
+        $channels[ $name ] = [
+            'channel'=>$name,
+            'tier'=>$meta['tier'],
+            'checkpoint_kind'=>$meta['kind'],
+            'confirmed'=>0,
+            'pending'=>0,
+            'unavailable'=>0,
+            'failed'=>0,
+            'latest_observed_at'=>null,
+            'median_minutes_to_confirm'=>null,
+        ];
+    }
+    $delays = [];
+
+    $kinds = [];
+    $proofs_in_checkpoints = 0;
+    $earliest_period_start = null;
+    $latest_period_end = null;
+
+    foreach ( [ 'hourly', 'daily' ] as $kind ){
+        $batches = verifyum_witness_list_batches( $checkpoint_store, $kind );
+        $created = [];
+        $latest = null;
+        foreach ( $batches as $batch_id ){
+            $checkpoint = verifyum_witness_read_public_checkpoint( $checkpoint_store, $kind, $batch_id );
+            if ( $checkpoint === null ){
+                continue;
+            }
+            $document = $checkpoint['checkpoint'] ?? $checkpoint['summary'] ?? null;
+            if ( !is_array( $document ) ){
+                continue;
+            }
+            if ( ( $document['network'] ?? null ) !== $network ){
+                continue;
+            }
+            $created[ $batch_id ] = (string)( $document['created_at'] ?? '' );
+            if ( $kind === 'hourly' ){
+                $proofs_in_checkpoints += (int)( $document['subject_count'] ?? 0 );
+            }
+            $start = (string)( $document['period_start'] ?? '' );
+            $end = (string)( $document['period_end'] ?? '' );
+            if ( $start !== '' and ( $earliest_period_start === null or $start < $earliest_period_start ) ){
+                $earliest_period_start = $start;
+            }
+            if ( $end !== '' and ( $latest_period_end === null or $end > $latest_period_end ) ){
+                $latest_period_end = $end;
+            }
+            if ( $latest === null ){
+                $latest = [
+                    'batch_id'=>$batch_id,
+                    'checkpoint_hash'=>(string)( $document['checkpoint_hash'] ?? '' ),
+                    'created_at'=>(string)( $document['created_at'] ?? '' ),
+                    'period_start'=>$start,
+                    'period_end'=>$end,
+                    'subject_count'=>(int)( $document['subject_count'] ?? 0 ),
+                    'checkpoint_url'=>'https://verifyum.com/witness/checkpoints/'. $kind .'/'. $batch_id .'.json',
+                    'receipt_url'=>'https://verifyum.com/witness/receipts/'. $kind .'/'. $batch_id .'.json',
+                ];
+            }
+        }
+
+        $kinds[ $kind ] = [
+            'count'=>count( $created ),
+            'latest'=>$latest,
+        ];
+
+        // Receipts advance after the checkpoint is written, so they are read
+        // separately and joined on the batch id.
+        foreach ( verifyum_witness_list_batches( $receipt_store, $kind ) as $batch_id ){
+            $receipt = verifyum_witness_read_public_receipts( $receipt_store, $kind, $batch_id );
+            if ( $receipt === null ){
+                continue;
+            }
+            $summary = $receipt['summary'];
+            if ( ( $summary['network'] ?? null ) !== $network ){
+                continue;
+            }
+            foreach ( $summary['channels'] as $entry ){
+                if ( !is_array( $entry ) ){
+                    continue;
+                }
+                $name = (string)( $entry['channel'] ?? '' );
+                $state = (string)( $entry['state'] ?? '' );
+                if ( !isset( $channels[ $name ] ) or !isset( $channels[ $name ][ $state ] ) ){
+                    continue;
+                }
+                $channels[ $name ][ $state ]++;
+                $observed = is_string( $entry['observed_at'] ?? null ) ? $entry['observed_at'] : null;
+                if ( $observed !== null and (
+                    $channels[ $name ]['latest_observed_at'] === null
+                    or $observed > $channels[ $name ]['latest_observed_at']
+                ) ){
+                    $channels[ $name ]['latest_observed_at'] = $observed;
+                }
+                if ( $state === 'confirmed' ){
+                    $minutes = verifyum_witness_minutes_between( $created[ $batch_id ] ?? null, $observed );
+                    if ( $minutes !== null ){
+                        $delays[ $name ][] = $minutes;
+                    }
+                }
+            }
+        }
+    }
+
+    foreach ( $channels as $name=>$row ){
+        $channels[ $name ]['median_minutes_to_confirm'] = verifyum_witness_median( $delays[ $name ] ?? [] );
+    }
+
+    $independent_confirmed = 0;
+    $independent_total = 0;
+    foreach ( $channels as $row ){
+        if ( $row['tier'] !== 'independent' ){
+            continue;
+        }
+        $independent_confirmed += $row['confirmed'];
+        $independent_total += $row['confirmed'] + $row['pending'] + $row['unavailable'] + $row['failed'];
+    }
+
+    return [
+        'schema'=>'https://verifyum.com/schema/witness-statistics-v1.json',
+        'protocol'=>'verifyum',
+        'version'=>1,
+        'network'=>$network,
+        'generated_at'=>verifyum_service_iso_time( $now ),
+        'checkpoints'=>$kinds,
+        'proofs_in_checkpoints'=>$proofs_in_checkpoints,
+        'coverage'=>[
+            'earliest_period_start'=>$earliest_period_start,
+            'latest_period_end'=>$latest_period_end,
+        ],
+        'independent_confirmations'=>[
+            'confirmed'=>$independent_confirmed,
+            'total'=>$independent_total,
+        ],
+        'channels'=>array_values( $channels ),
+    ];
+}
+
+/**
+ * The statistics scan opens every checkpoint and receipt file, so the result
+ * is cached briefly. The cache is written atomically and its age is checked
+ * on every request, which means a stale file can never be served silently as
+ * if it were current.
+ */
+function verifyum_witness_cached_statistics(
+    string $checkpoint_store,
+    string $receipt_store,
+    string $network,
+    string $cache_path,
+    int $max_age_seconds = 300,
+    ?int $now = null,
+    ?string $range_key = null,
+    ?string $log_directory = null,
+    array $internal_addresses = VERIFYUM_ACTIVITY_INTERNAL_ADDRESSES
+): array {
+    $now = $now ?? time();
+    if ( !is_link( $cache_path ) and is_file( $cache_path ) ){
+        $stamped = @filemtime( $cache_path );
+        if ( is_int( $stamped ) and ( $now - $stamped ) < $max_age_seconds ){
+            $cached = @file_get_contents( $cache_path );
+            $decoded = is_string( $cached ) ? json_decode( $cached, true ) : null;
+            if ( is_array( $decoded ) and ( $decoded['protocol'] ?? null ) === 'verifyum' ){
+                return $decoded;
+            }
+        }
+    }
+
+    $statistics = verifyum_witness_public_statistics(
+        $checkpoint_store,
+        $receipt_store,
+        $network,
+        $now
+    );
+    if ( $range_key !== null ){
+        $statistics['range'] = verifyum_witness_statistics_series(
+            $checkpoint_store,
+            $receipt_store,
+            $network,
+            $range_key,
+            $now
+        );
+        $statistics['recent'] = verifyum_witness_recent_checkpoints(
+            $checkpoint_store,
+            $receipt_store,
+            $network
+        );
+        if ( $log_directory !== null ){
+            $window = $statistics['range'];
+            $statistics['activity'] = verifyum_activity_series(
+                $log_directory,
+                (int)strtotime( $window['from'] ),
+                (int)strtotime( $window['to'] ),
+                (int)$window['bucket_seconds'],
+                VERIFYUM_ACTIVITY_HOSTS,
+                $internal_addresses
+            );
+        }
+    }
+
+    $directory = dirname( $cache_path );
+    if ( is_dir( $directory ) and is_writable( $directory ) ){
+        $temporary = $directory .'/.'. basename( $cache_path ) .'.tmp-'. bin2hex( random_bytes( 6 ) );
+        $encoded = json_encode( $statistics, JSON_UNESCAPED_SLASHES );
+        if ( is_string( $encoded ) and file_put_contents( $temporary, $encoded ) === strlen( $encoded ) ){
+            @chmod( $temporary, 0644 );
+            if ( !@rename( $temporary, $cache_path ) ){
+                @unlink( $temporary );
+            }
+        } else {
+            @unlink( $temporary );
+        }
+    }
+
+    return $statistics;
+}
+
+/**
+ * The ranges the status page offers, with the bucket each is drawn at. A
+ * range is chosen so it lands between roughly twelve and fifty two buckets:
+ * enough to show a shape, few enough to stay readable.
+ */
+const VERIFYUM_WITNESS_STATISTICS_RANGES = [
+    '1h'  => [ 'seconds'=>3600,     'bucket'=>300,    'label'=>'last hour' ],
+    '6h'  => [ 'seconds'=>21600,    'bucket'=>1800,   'label'=>'last 6 hours' ],
+    '12h' => [ 'seconds'=>43200,    'bucket'=>3600,   'label'=>'last 12 hours' ],
+    '24h' => [ 'seconds'=>86400,    'bucket'=>3600,   'label'=>'last 24 hours' ],
+    '7d'  => [ 'seconds'=>604800,   'bucket'=>21600,  'label'=>'last week' ],
+    '30d' => [ 'seconds'=>2592000,  'bucket'=>86400,  'label'=>'last month' ],
+    '1y'  => [ 'seconds'=>31536000, 'bucket'=>604800, 'label'=>'last year' ],
+];
+
+const VERIFYUM_WITNESS_STATISTICS_DEFAULT_RANGE = '7d';
+
+/**
+ * The instant a batch id refers to. Batch ids begin with the period start in
+ * basic ISO 8601, so a range can be applied without opening the file, which
+ * is what keeps a year long range from reading every checkpoint on disk.
+ */
+function verifyum_witness_batch_time( string $batch_id ): ?int
+{
+    if ( preg_match( '/\A([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-[0-9a-f]{64}\z/', $batch_id, $match ) !== 1 ){
+        return null;
+    }
+    $stamp = gmmktime(
+        (int)$match[4],
+        (int)$match[5],
+        (int)$match[6],
+        (int)$match[2],
+        (int)$match[3],
+        (int)$match[1]
+    );
+    return $stamp === false ? null : $stamp;
+}
+
+/**
+ * Counts the layer's activity over one window, bucketed for drawing. The
+ * figures are the same ones the totals are built from, restricted to a
+ * period, so a chart can never show something the totals contradict.
+ */
+function verifyum_witness_statistics_series(
+    string $checkpoint_store,
+    string $receipt_store,
+    string $network,
+    string $range_key,
+    ?int $now = null
+): array {
+    $now = $now ?? time();
+    if ( !isset( VERIFYUM_WITNESS_STATISTICS_RANGES[ $range_key ] ) ){
+        $range_key = VERIFYUM_WITNESS_STATISTICS_DEFAULT_RANGE;
+    }
+    $range = VERIFYUM_WITNESS_STATISTICS_RANGES[ $range_key ];
+    $bucket = $range['bucket'];
+
+    // Buckets are aligned to the bucket size rather than to the current
+    // second, so the same request a minute later draws the same bars. The
+    // window ends at the last completed bucket, so a bar is never drawn
+    // short merely because its period is still running.
+    $end = (int)( floor( $now / $bucket ) * $bucket );
+    $start = $end - $range['seconds'];
+    $count = (int)( $range['seconds'] / $bucket );
+
+    $labels = [];
+    for ( $index = 0; $index < $count; $index++ ){
+        $labels[] = verifyum_service_iso_time( $start + ( $index * $bucket ) );
+    }
+
+    $zeros = array_fill( 0, $count, 0 );
+    $series = [
+        'checkpoints_hourly'=>$zeros,
+        'checkpoints_daily'=>$zeros,
+        'proofs'=>$zeros,
+    ];
+    $channel_series = [];
+    foreach ( VERIFYUM_WITNESS_CHANNEL_TIERS as $name=>$meta ){
+        $channel_series[ $name ] = [
+            'confirmed'=>$zeros,
+            'waiting'=>$zeros,
+            'failed'=>$zeros,
+            'median_minutes'=>array_fill( 0, $count, null ),
+        ];
+    }
+    $delays = [];
+
+    $slot = static function ( int $stamp ) use ( $start, $bucket, $count ): ?int {
+        $index = (int)floor( ( $stamp - $start ) / $bucket );
+        return ( $index >= 0 and $index < $count ) ? $index : null;
+    };
+
+    foreach ( [ 'hourly', 'daily' ] as $kind ){
+        $created = [];
+        foreach ( verifyum_witness_list_batches( $checkpoint_store, $kind ) as $batch_id ){
+            $stamp = verifyum_witness_batch_time( $batch_id );
+            if ( $stamp === null or $stamp < $start or $stamp >= $end ){
+                continue;
+            }
+            $checkpoint = verifyum_witness_read_public_checkpoint( $checkpoint_store, $kind, $batch_id );
+            if ( $checkpoint === null ){
+                continue;
+            }
+            $document = $checkpoint['checkpoint'];
+            if ( ( $document['network'] ?? null ) !== $network ){
+                continue;
+            }
+            $index = $slot( $stamp );
+            if ( $index === null ){
+                continue;
+            }
+            $created[ $batch_id ] = (string)( $document['created_at'] ?? '' );
+            $series[ 'checkpoints_'. $kind ][ $index ]++;
+            if ( $kind === 'hourly' ){
+                $series['proofs'][ $index ] += (int)( $document['subject_count'] ?? 0 );
+            }
+        }
+
+        foreach ( verifyum_witness_list_batches( $receipt_store, $kind ) as $batch_id ){
+            $stamp = verifyum_witness_batch_time( $batch_id );
+            if ( $stamp === null or $stamp < $start or $stamp >= $end ){
+                continue;
+            }
+            $index = $slot( $stamp );
+            if ( $index === null ){
+                continue;
+            }
+            $receipt = verifyum_witness_read_public_receipts( $receipt_store, $kind, $batch_id );
+            if ( $receipt === null or ( $receipt['summary']['network'] ?? null ) !== $network ){
+                continue;
+            }
+            foreach ( $receipt['summary']['channels'] as $entry ){
+                if ( !is_array( $entry ) ){
+                    continue;
+                }
+                $name = (string)( $entry['channel'] ?? '' );
+                if ( !isset( $channel_series[ $name ] ) ){
+                    continue;
+                }
+                $state = (string)( $entry['state'] ?? '' );
+                if ( $state === 'confirmed' ){
+                    $channel_series[ $name ]['confirmed'][ $index ]++;
+                    $minutes = verifyum_witness_minutes_between(
+                        $created[ $batch_id ] ?? null,
+                        is_string( $entry['observed_at'] ?? null ) ? $entry['observed_at'] : null
+                    );
+                    if ( $minutes !== null ){
+                        $delays[ $name ][ $index ][] = $minutes;
+                    }
+                } elseif ( $state === 'failed' ){
+                    $channel_series[ $name ]['failed'][ $index ]++;
+                } elseif ( $state === 'pending' or $state === 'unavailable' ){
+                    $channel_series[ $name ]['waiting'][ $index ]++;
+                }
+            }
+        }
+    }
+
+    foreach ( $delays as $name=>$buckets ){
+        foreach ( $buckets as $index=>$values ){
+            $channel_series[ $name ]['median_minutes'][ $index ] = verifyum_witness_median( $values );
+        }
+    }
+
+    return [
+        'key'=>$range_key,
+        'label'=>$range['label'],
+        'from'=>verifyum_service_iso_time( $start ),
+        'to'=>verifyum_service_iso_time( $end ),
+        'bucket_seconds'=>$bucket,
+        'buckets'=>$labels,
+        'series'=>$series,
+        'channels'=>$channel_series,
+    ];
+}
+
+const VERIFYUM_WITNESS_RECENT_LIMIT = 25;
+
+/**
+ * The newest checkpoints of each kind with the outbound references their
+ * receipts carry, so a reader can leave for the provider and check the
+ * record where it actually lives. Only http and https references travel:
+ * anything else is a local artifact digest, not somewhere to send a reader.
+ */
+function verifyum_witness_recent_checkpoints(
+    string $checkpoint_store,
+    string $receipt_store,
+    string $network,
+    int $limit = VERIFYUM_WITNESS_RECENT_LIMIT
+): array {
+    $recent = [];
+    foreach ( [ 'hourly', 'daily' ] as $kind ){
+        $taken = 0;
+        foreach ( verifyum_witness_list_batches( $checkpoint_store, $kind ) as $batch_id ){
+            if ( $taken >= $limit ){
+                break;
+            }
+            $checkpoint = verifyum_witness_read_public_checkpoint( $checkpoint_store, $kind, $batch_id );
+            if ( $checkpoint === null ){
+                continue;
+            }
+            $document = $checkpoint['checkpoint'];
+            if ( ( $document['network'] ?? null ) !== $network ){
+                continue;
+            }
+            $taken++;
+
+            $channels = [];
+            $receipt = verifyum_witness_read_public_receipts( $receipt_store, $kind, $batch_id );
+            if ( $receipt !== null and ( $receipt['summary']['network'] ?? null ) === $network ){
+                foreach ( $receipt['summary']['channels'] as $entry ){
+                    if ( !is_array( $entry ) ){
+                        continue;
+                    }
+                    $name = (string)( $entry['channel'] ?? '' );
+                    if ( !isset( VERIFYUM_WITNESS_CHANNEL_TIERS[ $name ] ) ){
+                        continue;
+                    }
+                    $links = [];
+                    foreach ( (array)( $entry['artifacts'] ?? [] ) as $artifact ){
+                        if ( !is_array( $artifact ) ){
+                            continue;
+                        }
+                        $reference = $artifact['reference'] ?? null;
+                        if ( !is_string( $reference ) or preg_match( '#\Ahttps?://#i', $reference ) !== 1 ){
+                            continue;
+                        }
+                        $links[] = [
+                            'kind'=>(string)( $artifact['kind'] ?? 'artifact' ),
+                            'url'=>$reference,
+                        ];
+                    }
+                    $channels[] = [
+                        'channel'=>$name,
+                        'tier'=>VERIFYUM_WITNESS_CHANNEL_TIERS[ $name ]['tier'],
+                        'state'=>(string)( $entry['state'] ?? '' ),
+                        'observed_at'=>is_string( $entry['observed_at'] ?? null ) ? $entry['observed_at'] : null,
+                        'links'=>$links,
+                    ];
+                }
+            }
+
+            $recent[] = [
+                'kind'=>$kind,
+                'batch_id'=>$batch_id,
+                'period_start'=>(string)( $document['period_start'] ?? '' ),
+                'period_end'=>(string)( $document['period_end'] ?? '' ),
+                'created_at'=>(string)( $document['created_at'] ?? '' ),
+                'subject_count'=>(int)( $document['subject_count'] ?? 0 ),
+                'merkle_root'=>(string)( $document['merkle_root'] ?? '' ),
+                'checkpoint_url'=>'https://verifyum.com/witness/checkpoints/'. $kind .'/'. $batch_id .'.json',
+                'receipt_url'=>'https://verifyum.com/witness/receipts/'. $kind .'/'. $batch_id .'.json',
+                'channels'=>$channels,
+            ];
+        }
+    }
+
+    // Newest first across both kinds, so the list reads as one history.
+    usort( $recent, static function ( array $left, array $right ): int {
+        return strcmp( (string)$right['period_start'], (string)$left['period_start'] );
+    } );
+    return $recent;
+}
+
+/*
+ * Site activity is counted from the access log the server already writes and
+ * the privacy page already describes. Nothing new is collected and nothing
+ * runs in a visitor's browser. Addresses are used to count how many distinct
+ * sources appeared and are never stored or returned: they are hashed into a
+ * set that is discarded when the count is taken.
+ *
+ * The log is daily files under a temporary directory with a thirty day
+ * policy, so a window reaching further back than that is answered from what
+ * survives, and the result says how far the log actually goes.
+ */
+
+const VERIFYUM_ACTIVITY_LOG_DIR = '/tmp';
+// The log directory is shared with other applications on this host that use
+// the same naming, so the hosts are listed rather than discovered. Counting
+// a neighbour's traffic as ours would be worse than counting none.
+const VERIFYUM_ACTIVITY_HOSTS = [
+    'verifyum.com',
+    'api.verifyum.com',
+    'proof.verifyum.com',
+    'invalid.verifyum.com',
+];
+const VERIFYUM_ACTIVITY_MAX_LINES = 400000;
+const VERIFYUM_ACTIVITY_TOP_PATHS = 12;
+
+/*
+ * Traffic that is ours, and traffic that was never going to be a visitor.
+ *
+ * The addresses are configured rather than guessed: the operator knows which
+ * are theirs and nothing in the log says so. Loopback is the default because
+ * a request from the machine itself is always the machine itself.
+ *
+ * A probe is a request for something this service has never served. The list
+ * is of what scanners actually ask for, not of what we route, so adding a
+ * page later cannot turn it into a probe by accident.
+ */
+const VERIFYUM_ACTIVITY_INTERNAL_ADDRESSES = [ '127.0.0.1', '::1' ];
+const VERIFYUM_ACTIVITY_PROBE_PATTERN =
+    '#\\A/(\\.git|\\.env|\\.aws|\\.ssh|\\.vscode|\\.idea|\\.DS_Store'
+    .'|wp-|wordpress|xmlrpc\\.php|wp-login|wp-admin'
+    .'|phpmyadmin|pma/|myadmin|adminer'
+    .'|cgi-bin|vendor/|config\\.json|configuration\\.php'
+    .'|\\.svn|\\.hg|backup|dump\\.sql|shell\\.php|eval-stdin)#i';
+
+function verifyum_activity_is_internal( string $address, array $internal ): bool
+{
+    foreach ( $internal as $known ){
+        if ( $address === $known ){
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Whether a path is one only a scanner asks for. A request nobody could have
+ * followed a link to is not a visitor, and counting it as one flatters every
+ * figure beside it.
+ */
+function verifyum_activity_is_probe( string $path ): bool
+{
+    return preg_match( VERIFYUM_ACTIVITY_PROBE_PATTERN, $path ) === 1;
+}
+
+/**
+ * Which part of the service a request was for. The page a visitor reads, a
+ * proof someone was given, the machine surface, or the files a page pulls in
+ * on its own. Assets are separated because one page view drags several with
+ * it and would otherwise drown the count it belongs to.
+ */
+function verifyum_activity_area( string $host, string $path ): string
+{
+    if ( $host === 'proof.verifyum.com' ){
+        return 'proof';
+    }
+    if ( $host === 'api.verifyum.com' ){
+        return 'api';
+    }
+    // A request that named no host we serve is almost always a scanner, and
+    // counting it as a page view would flatter every other figure.
+    if ( $host === 'invalid.verifyum.com' ){
+        return 'unknown_host';
+    }
+    if ( preg_match( '#\A/(assets|imgs)/#', $path ) === 1
+        or preg_match( '#\.(css|js|mjs|png|jpg|jpeg|svg|ico|woff2?|map)\z#i', $path ) === 1 ){
+        return 'asset';
+    }
+    if ( preg_match( '#\A/(witness|api)/#', $path ) === 1 ){
+        return 'record';
+    }
+    return 'page';
+}
+
+/**
+ * Whether the user agent announces itself as an automated client. This is
+ * what the client says about itself and nothing more, so the figure is a
+ * floor for automated traffic, never a measurement of it.
+ */
+function verifyum_activity_is_declared_bot( string $user_agent ): bool
+{
+    return preg_match(
+        '/bot|crawler|spider|slurp|curl|wget|python-requests|httpx|scrapy|headless|monitor|uptime|probe|scanner/i',
+        $user_agent
+    ) === 1;
+}
+
+/**
+ * The earliest date the log still holds, taken from the file names rather
+ * than from their contents. A quiet day is not a missing day, and the
+ * distinction decides whether the page may claim to cover a window.
+ */
+function verifyum_activity_log_reach( string $directory, array $hosts = VERIFYUM_ACTIVITY_HOSTS ): ?int
+{
+    if ( is_link( $directory ) or !is_dir( $directory ) ){
+        return null;
+    }
+    $entries = @scandir( $directory );
+    if ( !is_array( $entries ) ){
+        return null;
+    }
+    $earliest = null;
+    foreach ( $entries as $entry ){
+        if ( preg_match( '/\Aswoole_access_(\d{4}-\d{2}-\d{2})-\[(.+)\]\.log\z/', $entry, $match ) !== 1 ){
+            continue;
+        }
+        // A neighbour application writing beside us must not decide how far
+        // our own log reaches.
+        if ( !in_array( $match[2], $hosts, true ) ){
+            continue;
+        }
+        // Read in the writer's timezone, for the same reason.
+        $day = strtotime( $match[1] .' 00:00:00' );
+        if ( $day !== false and ( $earliest === null or $day < $earliest ) ){
+            $earliest = $day;
+        }
+    }
+    return $earliest;
+}
+
+function verifyum_activity_log_files( string $directory, int $from, int $to, array $hosts ): array
+{
+    if ( is_link( $directory ) or !is_dir( $directory ) ){
+        return [];
+    }
+    $files = [];
+    // The server names each file and stamps each line with date(), meaning
+    // its own timezone, so the same function has to be used to find them.
+    // A day either side is opened anyway and the per line timestamp decides.
+    for ( $day = $from - 86400; $day <= $to + 86400; $day += 86400 ){
+        foreach ( $hosts as $host ){
+            $path = rtrim( $directory, '/\\' ) .'/swoole_access_'. date( 'Y-m-d', $day ) .'-['. $host .'].log';
+            if ( !is_link( $path ) and is_file( $path ) and is_readable( $path ) ){
+                $files[ $path ] = $host;
+            }
+        }
+    }
+    return $files;
+}
+
+/**
+ * Counts requests, distinct sources and areas per bucket over one window.
+ * The return carries no address, no user agent and no full request line: a
+ * count, a set size, and the paths that were asked for most.
+ */
+function verifyum_activity_series(
+    string $log_directory,
+    int $from,
+    int $to,
+    int $bucket,
+    array $hosts = VERIFYUM_ACTIVITY_HOSTS,
+    array $internal = VERIFYUM_ACTIVITY_INTERNAL_ADDRESSES
+): array {
+    $count = max( 1, (int)( ( $to - $from ) / $bucket ) );
+    $zeros = array_fill( 0, $count, 0 );
+    $areas = [
+        'page'=>$zeros,
+        'proof'=>$zeros,
+        'api'=>$zeros,
+        'record'=>$zeros,
+        'asset'=>$zeros,
+        'unknown_host'=>$zeros,
+    ];
+    $requests = $zeros;
+    $declared_bots = $zeros;
+    $internal_requests = $zeros;
+    $probe_requests = $zeros;
+    $outside_requests = $zeros;
+    $sources = array_fill( 0, $count, [] );
+    $paths = [];
+    $lines_read = 0;
+    $truncated = false;
+
+    foreach ( verifyum_activity_log_files( $log_directory, $from, $to, $hosts ) as $path=>$host ){
+        $handle = @fopen( $path, 'rb' );
+        if ( $handle === false ){
+            continue;
+        }
+        while ( ( $line = fgets( $handle ) ) !== false ){
+            if ( ++$lines_read > VERIFYUM_ACTIVITY_MAX_LINES ){
+                $truncated = true;
+                break 2;
+            }
+            if ( preg_match(
+                '/\A\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] (\S+) "(\S+) ([^"]*)" "[^"]*" "(.*)"\s*\z/',
+                $line,
+                $match
+            ) !== 1 ){
+                continue;
+            }
+            $stamp = strtotime( $match[1] );
+            if ( $stamp === false ){
+                continue;
+            }
+            if ( $stamp < $from or $stamp >= $to ){
+                continue;
+            }
+            $index = (int)floor( ( $stamp - $from ) / $bucket );
+            if ( $index < 0 or $index >= $count ){
+                continue;
+            }
+
+            $requests[ $index ]++;
+            // Each request is counted once, in the first category it falls
+            // into, so the four always add up to the total. Overlapping
+            // counters made an earlier version subtract our own health check
+            // twice, because it is ours and calls itself curl.
+            $is_internal = verifyum_activity_is_internal( $match[2], $internal );
+            // && rather than and: the latter binds weaker than assignment,
+            // so $x = A and B() assigns A and discards B, which is exactly
+            // what happened here and made almost everything a probe.
+            $is_probe = !$is_internal && verifyum_activity_is_probe( $match[4] );
+            $is_crawler = !$is_internal && !$is_probe
+                && verifyum_activity_is_declared_bot( $match[5] );
+            if ( $is_internal ){
+                $internal_requests[ $index ]++;
+            } elseif ( $is_probe ){
+                $probe_requests[ $index ]++;
+            } elseif ( $is_crawler ){
+                $declared_bots[ $index ]++;
+            } else {
+                $outside_requests[ $index ]++;
+            }
+            // Only the presence of a source matters, so the address is
+            // reduced to a short digest and the digest is thrown away with
+            // the set once the size is taken.
+            $sources[ $index ][ substr( hash( 'sha256', $match[2] ), 0, 16 ) ] = true;
+            $area = verifyum_activity_area( $host, $match[4] );
+            $areas[ $area ][ $index ]++;
+            if ( ( $area === 'page' or $area === 'proof' ) and !$is_internal and !$is_probe and !$is_crawler ){
+                $key = $area === 'proof' ? '(a proof)' : $match[4];
+                $paths[ $key ] = ( $paths[ $key ] ?? 0 ) + 1;
+            }
+        }
+        fclose( $handle );
+    }
+
+    $reach = verifyum_activity_log_reach( $log_directory, $hosts );
+
+    $distinct = [];
+    foreach ( $sources as $bucket_sources ){
+        $distinct[] = count( $bucket_sources );
+    }
+
+    arsort( $paths );
+    $top = [];
+    foreach ( array_slice( $paths, 0, VERIFYUM_ACTIVITY_TOP_PATHS, true ) as $key=>$hits ){
+        $top[] = [ 'path'=>$key, 'requests'=>$hits ];
+    }
+
+    return [
+        'requests'=>$requests,
+        'distinct_sources'=>$distinct,
+        'declared_bots'=>$declared_bots,
+        'internal'=>$internal_requests,
+        'probes'=>$probe_requests,
+        'outside'=>$outside_requests,
+        'areas'=>$areas,
+        'top_paths'=>$top,
+        'log_starts_at'=>$reach === null ? null : verifyum_service_iso_time( $reach ),
+        'covers_whole_window'=>$reach !== null and $reach <= $from,
+        'truncated'=>$truncated,
+    ];
+}

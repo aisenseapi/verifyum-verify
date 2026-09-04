@@ -1,0 +1,35 @@
+name: Verifyum stamp
+description: Anchor files so their bytes can be proven to have existed, unchanged, at this point in time.
+author: AI SENSE AS
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  files:
+    description: Files to stamp, one per line or space separated. Globs are expanded by the shell.
+    required: true
+  upload-receipts:
+    description: Upload the receipts as a build artifact. They hold the nonce, without which the proof cannot be tied to the file.
+    required: false
+    default: "true"
+  artifact-name:
+    description: Name of the receipt artifact.
+    required: false
+    default: verifyum-receipts
+
+runs:
+  using: composite
+  steps:
+    - name: Stamp
+      shell: bash
+      run: |
+        set -euo pipefail
+        npx --yes verifyum@1 stamp ${{ inputs.files }}
+    - name: Upload receipts
+      if: inputs.upload-receipts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: "**/*.verifyum.json"
+        if-no-files-found: error
