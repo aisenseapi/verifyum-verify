@@ -62,7 +62,7 @@ __all__ = [
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
-USER_AGENT = "verifyum-python/1.1"
+USER_AGENT = "verifyum-python/1.1.0"
 
 # Ed25519 is optional: without it the signature is reported as unchecked
 # rather than failing, so the hash checks still work on a bare interpreter.
