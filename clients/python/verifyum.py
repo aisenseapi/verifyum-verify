@@ -570,8 +570,12 @@ def verify_witness_documents(metadata, bundle, registry) -> dict:
 # The receipt sits beside the file as <file>.verifyum.json, the way an .ots
 # file does, so `verify` needs nothing but the original path. It holds the
 # nonce, which is the only thing that ties the file to its public proof, and
-# which Verifyum never has. Losing it loses the link for good, so the file is
-# written with owner-only permissions and the tool says so.
+# which Verifyum never has. Losing it loses the link for good.
+#
+# The mode is set to 0600, which POSIX honours and Windows does not: there a
+# receipt lands 0666 and inherits the directory's ACL. The tool therefore
+# does not promise the file is private. It says what the file is and leaves
+# the placing of it to someone who knows where their own secrets belong.
 # --------------------------------------------------------------------------
 
 RECEIPT_SUFFIX = ".verifyum.json"
@@ -588,7 +592,11 @@ def receipt_path(path: str) -> str:
 
 
 def write_receipt(path: str, proof: dict) -> str:
-    """Stores the proof and its draft beside the file, owner readable only."""
+    """Stores the proof and its draft beside the file.
+
+    The mode request is honoured on POSIX and ignored on Windows, so this
+    does not make the file private on its own.
+    """
     target = receipt_path(path)
     document = {
         "schema": "https://verifyum.com/schema/receipt-v1.json",
@@ -655,7 +663,10 @@ def _cmd_stamp(args) -> int:
                 "  proof   " + str(proof.get("proof_id")),
                 "  status  " + str(proof.get("status")),
                 "  url     " + str(proof.get("proof_url")),
-                "  receipt " + target + "  (holds the nonce: keep it, we do not have it)",
+                "  receipt " + target,
+                "          this holds the nonce. We do not have it and cannot",
+                "          replace it. Keep it, and do not commit or sync it",
+                "          anywhere you would not put a key.",
             ],
         )
     return worst
@@ -733,7 +744,8 @@ def main(argv=None) -> int:
         prog="verifyum",
         description="Prove that a file existed, unchanged, at a point in time.",
         epilog="The receipt beside each file holds the nonce. Verifyum never has it, "
-               "so a lost receipt cannot be recovered from us or from anyone.",
+               "so a lost receipt cannot be recovered from us or from anyone. Treat it "
+               "like a key: it is not made private by being written.",
     )
     parser.add_argument("--version", action="version", version="verifyum " + USER_AGENT.split("/")[-1])
     sub = parser.add_subparsers(dest="command", required=True)

@@ -10,6 +10,10 @@ leaves your machine: only a domain-separated commitment is sent.
 holds the nonce, which is the only thing tying your file to its public
 proof, and which Verifyum never has. Losing it loses the link for good.
 
+Treat it like a key. The file is created with mode 0600, which POSIX honours
+and Windows ignores, so writing it does not make it private: do not commit
+it and do not sync it anywhere you would not put a credential.
+
 `verify` recomputes the commitment from the bytes and the receipt and checks
 it against the public record. `verifyum witness contract.pdf` additionally
 walks the Merkle path to the checkpoint and checks the service signature.

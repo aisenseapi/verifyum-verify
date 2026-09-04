@@ -635,8 +635,12 @@ export async function verifyWitness(proofId, { registryUrl = REGISTRY_URL } = {}
 // The receipt sits beside the file as <file>.verifyum.json, the way an .ots
 // file does, so verify needs nothing but the original path. It holds the
 // nonce, the only thing tying the file to its public proof, and which
-// Verifyum never has. A lost receipt cannot be recovered from us or anyone,
-// so it is written owner-readable and the tool says so.
+// Verifyum never has. A lost receipt cannot be recovered from us or anyone.
+//
+// The mode is set to 0600, which POSIX honours and Windows does not: there a
+// receipt lands 0666 and inherits the directory's ACL. The tool therefore
+// does not promise the file is private. It says what the file is and leaves
+// the placing of it to someone who knows where their own secrets belong.
 //
 // Reading and writing happen through node:fs, imported here rather than at
 // the top, so a browser or a bundler that only wants the library never has
@@ -698,7 +702,8 @@ function usage() {
     "  --no-wait  return as soon as the anchor is queued (stamp)",
     "",
     "The receipt beside each file holds the nonce. Verifyum never has it, so a",
-    "lost receipt cannot be recovered from us or from anyone.",
+    "lost receipt cannot be recovered from us or from anyone. Treat it like a",
+    "key: it is not made private by being written.",
     "",
   ].join("\n"));
 }
@@ -741,7 +746,10 @@ export async function main(argv) {
             "  proof   " + proof.proof_id,
             "  status  " + proof.status,
             "  url     " + proof.proof_url,
-            "  receipt " + written + "  (holds the nonce: keep it, we do not have it)",
+            "  receipt " + written,
+            "          this holds the nonce. We do not have it and cannot",
+            "          replace it. Keep it, and do not commit or sync it",
+            "          anywhere you would not put a key.",
           ]
         );
       } catch (error) {
