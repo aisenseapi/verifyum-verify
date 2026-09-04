@@ -64,14 +64,115 @@ API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
 USER_AGENT = "verifyum-python/1.1.0"
 
-# Ed25519 is optional: without it the signature is reported as unchecked
-# rather than failing, so the hash checks still work on a bare interpreter.
+# Ed25519 verification is built in, so "standard library only" is true of the
+# whole verifier and not only of the hashing. cryptography is used when it is
+# installed because it is far faster; the result is the same either way. An
+# earlier version treated the signature as unchecked when cryptography was
+# absent, and still reported the proof valid, which meant a bare install
+# printed success for a check that had not run.
 try:
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey as _Ed25519PublicKey
     from cryptography.exceptions import InvalidSignature as _InvalidSignature
 except Exception:  # pragma: no cover
     _Ed25519PublicKey = None
     _InvalidSignature = None
+
+
+# Ed25519 verification, RFC 8032, pure Python. Verification handles only
+# public values, so nothing here needs to be constant time; signing would be
+# a different matter and is deliberately absent.
+_P = 2 ** 255 - 19
+_L = 2 ** 252 + 27742317777372353535851937790883648493
+_D = -121665 * pow(121666, _P - 2, _P) % _P
+_I = pow(2, (_P - 1) // 4, _P)
+
+
+def _recover_x(y, sign):
+    if y >= _P:
+        return None
+    xx = (y * y - 1) * pow(_D * y * y + 1, _P - 2, _P) % _P
+    x = pow(xx, (_P + 3) // 8, _P)
+    if (x * x - xx) % _P != 0:
+        x = x * _I % _P
+    if (x * x - xx) % _P != 0:
+        return None
+    if x == 0 and sign:
+        return None
+    return _P - x if x & 1 != sign else x
+
+
+def _add(p, q):
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    a = (y1 - x1) * (y2 - x2) % _P
+    b = (y1 + x1) * (y2 + x2) % _P
+    c = 2 * t1 * t2 * _D % _P
+    d = 2 * z1 * z2 % _P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _P, g * h % _P, f * g % _P, e * h % _P)
+
+
+def _mul(point, scalar):
+    result = (0, 1, 1, 0)
+    while scalar > 0:
+        if scalar & 1:
+            result = _add(result, point)
+        point = _add(point, point)
+        scalar >>= 1
+    return result
+
+
+_GY = 4 * pow(5, _P - 2, _P) % _P
+_GX = _recover_x(_GY, 0)
+_G = (_GX, _GY, 1, _GX * _GY % _P)
+
+
+def _decompress(data):
+    if len(data) != 32:
+        return None
+    y = int.from_bytes(data, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = _recover_x(y, sign)
+    return None if x is None else (x, y, 1, x * y % _P)
+
+
+def _equal(p, q):
+    x1, y1, z1, _ = p
+    x2, y2, z2, _ = q
+    return (x1 * z2 - x2 * z1) % _P == 0 and (y1 * z2 - y2 * z1) % _P == 0
+
+
+def ed25519_verify(public_key, signature, message):
+    """RFC 8032 verification. Returns False on any malformed input."""
+    if len(public_key) != 32 or len(signature) != 64:
+        return False
+    point = _decompress(public_key)
+    if point is None:
+        return False
+    r = _decompress(signature[:32])
+    if r is None:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _L:
+        return False
+    challenge = int.from_bytes(
+        hashlib.sha512(signature[:32] + public_key + message).digest(), "little"
+    ) % _L
+    return _equal(_mul(_G, s), _add(r, _mul(point, challenge)))
+
+
+def ed25519_check(public_key: bytes, signature: bytes, message: bytes) -> bool:
+    """Verifies an Ed25519 signature, by whichever implementation is present."""
+    if _Ed25519PublicKey is not None:
+        try:
+            _Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
+            return True
+        except _InvalidSignature:
+            return False
+        except (ValueError, TypeError):
+            return False
+    return ed25519_verify(public_key, signature, message)
 
 # Always used with fullmatch(): with match() a trailing "$" still matches
 # before a final newline, so "sha256:<hex>\n" would pass as a digest string.
@@ -305,11 +406,9 @@ def _select_service_key(registry: dict, key_id: str, network: str) -> bytes:
 def verify_service_signature(metadata: dict, registry: dict) -> bool | None:
     """R10: Ed25519 over JCS(metadata minus service_signature).
 
-    Returns True or False when the check ran, None when no Ed25519
-    implementation is available so the caller can report "unchecked".
+    Returns True or False. It no longer returns None for a missing Ed25519
+    implementation, because there is always one.
     """
-    if _Ed25519PublicKey is None:
-        return None
     if not isinstance(metadata, dict) or not isinstance(registry, dict):
         return False
     signature = metadata.get("service_signature")
@@ -328,10 +427,7 @@ def verify_service_signature(metadata: dict, registry: dict) -> bool | None:
         if len(raw_signature) != 64:
             return False
         message = jcs({key: value for key, value in metadata.items() if key != "service_signature"})
-        _Ed25519PublicKey.from_public_bytes(public_key).verify(raw_signature, message)
-        return True
-    except _InvalidSignature:
-        return False
+        return ed25519_check(public_key, raw_signature, message)
     except (ValueError, TypeError):
         return False
 
@@ -725,7 +821,9 @@ def _cmd_witness(args) -> int:
             print("verifyum: " + str(error), file=sys.stderr)
             worst = max(worst, EXIT_UNAVAILABLE)
             continue
-        ok = bool(result.get("valid"))
+        # A check that did not run is not a check that passed.
+        unchecked = [name for name, passed in (result.get("checks") or {}).items() if passed is None]
+        ok = bool(result.get("valid")) and not unchecked
         if not ok:
             worst = max(worst, EXIT_FAILED)
         _emit(
@@ -734,7 +832,7 @@ def _cmd_witness(args) -> int:
             [
                 ("witnessed " if ok else "FAILED    ") + proof_id,
                 "  checkpoint " + str(result.get("checkpoint_hash") or result.get("checkpoint", {}).get("checkpoint_hash")),
-            ],
+            ] + (["  not run  " + ", ".join(unchecked)] if unchecked else []),
         )
     return worst
 

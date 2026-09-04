@@ -60,6 +60,41 @@ $check(
 );
 
 echo "\n";
+// R10 is verified with the client's own Ed25519 rather than a library's, so
+// the standard's vectors are run against it. A signature that cannot be
+// checked must never read as one that passed, which is what a bare install
+// used to print: valid true and service_signature_valid null in the same
+// object.
+$client_path = dirname( __DIR__ ) .'/static/client-verifyum.py';
+$client_source = (string)file_get_contents( $client_path );
+$check(
+    strlen( $client_source ) > 20000,
+    'the client source is readable, so the checks below are about its contents'
+);
+$vectors = json_decode( trim( (string)shell_exec(
+    'python '. escapeshellarg( __DIR__ .'/check-ed25519.py' )
+    .' '. escapeshellarg( $client_path ) .' 2>&1'
+) ), true );
+$check(
+    is_array( $vectors ) and ( $vectors['accepted'] ?? 0 ) === 3,
+    'the built-in Ed25519 accepts all three RFC 8032 vectors'
+);
+$check(
+    is_array( $vectors )
+        and ( $vectors['tampered_rejected'] ?? 0 ) === 3
+        and ( $vectors['short_key_rejected'] ?? 0 ) === 3
+        and ( $vectors['short_signature_rejected'] ?? 0 ) === 3,
+    'the built-in Ed25519 refuses a tampered message, a short key and a short signature'
+);
+$check(
+    $client_source !== '' and !str_contains( $client_source, 'if _Ed25519PublicKey is None:' ),
+    'the signature check no longer reports unchecked when cryptography is absent'
+);
+$check(
+    str_contains( $client_source, 'A check that did not run is not a check that passed.' ),
+    'the command refuses to call a proof witnessed while a check was skipped'
+);
+
 if ( $failures === [] ){
     echo "check-protocol: {$checks} checks passed\n";
     exit( 0 );
