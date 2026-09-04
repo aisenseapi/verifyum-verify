@@ -95,6 +95,38 @@ $check(
     'the command refuses to call a proof witnessed while a check was skipped'
 );
 
+// A receipt has to stand without us. The claim is not convenience: it is
+// that if this service is gone in seven years, the file, the receipt and a
+// SHA-256 implementation still settle the question. The check runs with
+// every outbound call rigged to raise, so a pass cannot come from being
+// online.
+$offline = json_decode( trim( (string)shell_exec(
+    'python '. escapeshellarg( __DIR__ .'/check-offline.py' )
+    .' '. escapeshellarg( dirname( __DIR__ ) .'/static/client-verifyum.py' )
+    .' '. escapeshellarg( __DIR__ .'/fixtures/self-bearing-receipt.json' ) .' 2>&1'
+) ), true );
+$check(
+    is_array( $offline ) and ( $offline['ran_without_network'] ?? false ) === true,
+    'a complete receipt verifies with every network call rigged to fail'
+);
+$check(
+    is_array( $offline ) and ( $offline['witness_half_passes'] ?? false ) === true,
+    'the Merkle path, checkpoint hash and service signature all check from the receipt alone'
+);
+$check(
+    is_array( $offline ) and ( $offline['wrong_file_rejected'] ?? false ) === true,
+    'offline verification refuses a file that is not the one the receipt binds'
+);
+$check(
+    is_array( $offline ) and ( $offline['thin_receipt_refused'] ?? false ) === true,
+    'a receipt written before its checkpoint existed says so instead of checking less'
+);
+$check(
+    is_array( $offline ) and ( $offline['memo_rebuilds'] ?? false ) === true
+        and ( $offline['memo_is_128_bytes'] ?? false ) === true,
+    'the anchor memo rebuilds from the receipt at the fixed 128 bytes'
+);
+
 if ( $failures === [] ){
     echo "check-protocol: {$checks} checks passed\n";
     exit( 0 );

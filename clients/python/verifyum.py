@@ -661,6 +661,190 @@ def verify_witness_documents(metadata, bundle, registry) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Self-bearing receipts
+#
+# A receipt used to hold the nonce and a proof id, and everything else lived
+# at verifyum.com. That made the holder depend on our uptime for the life of
+# the claim, which is the opposite of what the product promises and unlike
+# the .ots file it was modelled on. A receipt now carries the signed
+# metadata, the witness bundle with its Merkle path, and the key registry:
+# about three kilobytes, after which no request to us is needed to check it.
+#
+# What still cannot be carried is the ledger. `verify --independent` reads
+# the transaction from a public Solana RPC and compares the memo itself.
+# --------------------------------------------------------------------------
+
+RECEIPT_VERSION = 3
+
+SOLANA_RPC = os.environ.get("VERIFYUM_SOLANA_RPC", "https://api.mainnet-beta.solana.com")
+
+MEMO_PROGRAM = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+
+
+def build_memo(proof_id: str, commitment: str) -> str:
+    """The exact memo the anchor carries, so a reader can rebuild it."""
+    return "verifyum:v2:id={};alg=sha256;commitment={}".format(
+        proof_id, commitment[len("sha256:"):]
+    )
+
+
+def fetch_evidence(proof_id: str) -> dict:
+    """Collects everything a receipt needs to be checkable without us.
+
+    Returns the parts it could get. The witness bundle only exists once the
+    proof has been folded into an hourly checkpoint, so a receipt written
+    immediately after anchoring is thin until `upgrade` completes it.
+    """
+    evidence = {}
+    try:
+        evidence["metadata"] = _request(
+            "GET", f"https://{proof_id}.{PROOF_DOMAIN}/.well-known/verifyum.json"
+        )["body"]
+    except VerifyumError:
+        pass
+    try:
+        evidence["witness_bundle"] = _request("GET", f"/v2/proofs/{proof_id}/witnesses")["body"]
+    except VerifyumError:
+        pass
+    try:
+        evidence["service_keys"] = _request(
+            "GET", f"https://{PROOF_DOMAIN}/.well-known/verifyum-service-keys.json"
+        )["body"]
+    except VerifyumError:
+        pass
+    return evidence
+
+
+def receipt_is_complete(receipt: dict) -> bool:
+    """True when the receipt can be checked with no network at all."""
+    return all(
+        isinstance(receipt.get(part), dict)
+        for part in ("metadata", "witness_bundle", "service_keys")
+    )
+
+
+def verify_offline(data: bytes, receipt: dict) -> dict:
+    """Checks a file against a complete receipt without contacting anyone.
+
+    Covers the local binding, the signed metadata, the Merkle path into the
+    checkpoint and the service signature. It cannot cover the ledger: for
+    that the transaction has to be read from somewhere, which is what
+    `verify_independent` does.
+    """
+    if not receipt_is_complete(receipt):
+        raise VerifyumError(
+            "receipt does not carry its evidence yet; run `verifyum upgrade` while online"
+        )
+    draft = receipt["private_draft"]
+    manifest = draft["manifest"]
+    metadata = receipt["metadata"]
+    checks = {
+        "hash_matches": hashlib.sha256(data).hexdigest() == manifest["file"]["hash"]["value"],
+        "size_matches": str(len(data)) == manifest["file"]["size"],
+        "commitment_matches": "sha256:"
+        + hashlib.sha256(b"verifyum:commitment:v2\n" + jcs(manifest)).hexdigest()
+        == draft["commitment"],
+        "metadata_commitment_matches": metadata.get("commitment") == draft["commitment"],
+        "anchor_finalized": metadata.get("anchor", {}).get("status") == "finalized",
+    }
+    witness = verify_witness_documents(
+        metadata, receipt["witness_bundle"], receipt["service_keys"]
+    )
+    checks.update(witness["checks"])
+    checks.pop("subject_id", None)
+    # A memo that does not rebuild from the receipt's own values would mean
+    # the receipt and the anchor describe different things.
+    memo = metadata.get("anchor", {}).get("memo")
+    checks["memo_matches"] = memo == build_memo(
+        metadata.get("proof_id", ""), draft["commitment"]
+    )
+    return {
+        "valid": all(value is True for value in checks.values()),
+        "checks": checks,
+        "transaction_signature": metadata.get("anchor", {}).get("transaction_signature"),
+        "network": metadata.get("anchor", {}).get("network"),
+        "offline": True,
+    }
+
+
+def verify_independent(receipt: dict, rpc_url: str | None = None) -> dict:
+    """Reads the anchor from a public Solana RPC and checks the memo itself.
+
+    Nothing here touches verifyum.com. The transaction is fetched by its
+    signature and the memo instruction is compared against the memo rebuilt
+    from the receipt, so the ledger, not the operator, is what answers.
+    """
+    metadata = receipt.get("metadata")
+    if not isinstance(metadata, dict):
+        raise VerifyumError(
+            "receipt does not carry its metadata; run `verifyum upgrade` while online"
+        )
+    anchor = metadata.get("anchor")
+    if not isinstance(anchor, dict) or not isinstance(anchor.get("transaction_signature"), str):
+        raise VerifyumError("receipt carries no transaction signature")
+
+    signature = anchor["transaction_signature"]
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTransaction",
+        "params": [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+    }).encode()
+    request = urllib.request.Request(
+        rpc_url or SOLANA_RPC,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            answer = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise VerifyumError(f"could not reach the Solana RPC: {error}") from None
+    if answer.get("error"):
+        raise VerifyumError("Solana RPC refused: " + str(answer["error"].get("message")))
+
+    result = answer.get("result")
+    checks = {"transaction_found": isinstance(result, dict)}
+    observed = None
+    if isinstance(result, dict):
+        checks["transaction_succeeded"] = (result.get("meta") or {}).get("err") is None
+        instructions = (
+            ((result.get("transaction") or {}).get("message") or {}).get("instructions") or []
+        )
+        for instruction in instructions:
+            if not isinstance(instruction, dict):
+                continue
+            if instruction.get("program") == "spl-memo" or instruction.get("programId") == MEMO_PROGRAM:
+                parsed = instruction.get("parsed")
+                if isinstance(parsed, str):
+                    observed = parsed
+                    break
+        checks["memo_present"] = isinstance(observed, str)
+        expected = build_memo(metadata.get("proof_id", ""), metadata.get("commitment", ""))
+        checks["memo_matches_receipt"] = observed == expected
+        checks["anchor_address_matches"] = True
+        address = anchor.get("anchor_address")
+        if isinstance(address, str):
+            signers = [
+                account.get("pubkey")
+                for account in (
+                    ((result.get("transaction") or {}).get("message") or {}).get("accountKeys") or []
+                )
+                if isinstance(account, dict) and account.get("signer")
+            ]
+            checks["anchor_address_matches"] = address in signers
+    return {
+        "valid": all(value is True for value in checks.values()),
+        "checks": checks,
+        "transaction_signature": signature,
+        "memo": observed,
+        "block_time": (result or {}).get("blockTime") if isinstance(result, dict) else None,
+        "source": rpc_url or SOLANA_RPC,
+    }
+
+
+# --------------------------------------------------------------------------
 # Command line
 #
 # The receipt sits beside the file as <file>.verifyum.json, the way an .ots
@@ -687,7 +871,7 @@ def receipt_path(path: str) -> str:
     return path + RECEIPT_SUFFIX
 
 
-def write_receipt(path: str, proof: dict) -> str:
+def write_receipt(path: str, proof: dict, evidence: dict | None = None) -> str:
     """Stores the proof and its draft beside the file.
 
     The mode request is honoured on POSIX and ignored on Windows, so this
@@ -697,13 +881,16 @@ def write_receipt(path: str, proof: dict) -> str:
     document = {
         "schema": "https://verifyum.com/schema/receipt-v1.json",
         "protocol": "verifyum",
-        "version": 2,
+        "version": RECEIPT_VERSION,
         "proof_id": proof.get("proof_id"),
         "commitment": proof.get("commitment"),
         "status": proof.get("status"),
         "proof_url": proof.get("proof_url"),
         "private_draft": proof.get("private_draft"),
     }
+    # Everything needed to check this without asking us anything.
+    for name, part in (evidence or {}).items():
+        document[name] = part
     body = json.dumps(document, indent=2, sort_keys=True) + "\n"
     temporary = target + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -750,9 +937,11 @@ def _cmd_stamp(args) -> int:
             print("verifyum: " + str(error), file=sys.stderr)
             worst = max(worst, EXIT_USAGE)
             continue
-        target = write_receipt(path, proof)
+        evidence = fetch_evidence(proof["proof_id"]) if proof.get("proof_id") else {}
+        target = write_receipt(path, proof, evidence)
+        complete = receipt_is_complete(read_receipt(path))
         _emit(
-            {"file": path, "receipt": target, "proof_id": proof.get("proof_id"), "status": proof.get("status"), "proof_url": proof.get("proof_url")},
+            {"file": path, "receipt": target, "proof_id": proof.get("proof_id"), "status": proof.get("status"), "proof_url": proof.get("proof_url"), "self_bearing": complete},
             args.json,
             [
                 "stamped  " + path,
@@ -763,7 +952,13 @@ def _cmd_stamp(args) -> int:
                 "          this holds the nonce. We do not have it and cannot",
                 "          replace it. Keep it, and do not commit or sync it",
                 "          anywhere you would not put a key.",
-            ],
+            ] + ([
+                "  evidence carried: this receipt checks offline",
+            ] if complete else [
+                "  evidence incomplete: the witness bundle appears when the next",
+                "          hourly checkpoint is published. Run `verifyum upgrade` then,",
+                "          and the receipt stops needing us at all.",
+            ]),
         )
     return worst
 
@@ -780,7 +975,17 @@ def _cmd_verify(args) -> int:
             worst = max(worst, EXIT_USAGE)
             continue
         try:
-            result = verify(receipt["proof_id"], data, receipt["private_draft"])
+            if args.offline:
+                result = verify_offline(data, receipt)
+            else:
+                result = verify(receipt["proof_id"], data, receipt["private_draft"])
+            if args.independent:
+                chain = verify_independent(receipt)
+                result["checks"].update(
+                    {"chain_" + name: value for name, value in chain["checks"].items()}
+                )
+                result["valid"] = result["valid"] and chain["valid"]
+                result["chain_source"] = chain["source"]
         except VerifyumError as error:
             print("verifyum: " + str(error), file=sys.stderr)
             worst = max(worst, EXIT_UNAVAILABLE)
@@ -799,6 +1004,11 @@ def _cmd_verify(args) -> int:
                 ("verified " if result["valid"] else "FAILED   ") + path,
                 "  proof   " + str(receipt.get("proof_id")),
                 "  chain   " + str(result.get("transaction_signature")),
+                "  source  " + (
+                    "the receipt alone" if args.offline and not args.independent
+                    else "the receipt and " + str(result.get("chain_source")) if args.offline
+                    else "verifyum.com" + (" and " + str(result.get("chain_source")) if args.independent else "")
+                ),
             ] + (["  failed  " + ", ".join(failed)] if failed else []),
         )
     return worst
@@ -837,6 +1047,48 @@ def _cmd_witness(args) -> int:
     return worst
 
 
+def _cmd_upgrade(args) -> int:
+    """Fills in the evidence a receipt was written too early to carry."""
+    worst = EXIT_OK
+    for path in args.files:
+        try:
+            receipt = read_receipt(path)
+        except (OSError, ValueError) as error:
+            print("verifyum: " + str(error), file=sys.stderr)
+            worst = max(worst, EXIT_USAGE)
+            continue
+        if receipt_is_complete(receipt) and not args.force:
+            _emit({"file": path, "upgraded": False, "self_bearing": True}, args.json,
+                  ["already complete  " + path])
+            continue
+        try:
+            evidence = fetch_evidence(receipt["proof_id"])
+        except (VerifyumError, KeyError) as error:
+            print("verifyum: " + str(error), file=sys.stderr)
+            worst = max(worst, EXIT_UNAVAILABLE)
+            continue
+        merged = dict(receipt)
+        merged.update(evidence)
+        merged["version"] = RECEIPT_VERSION
+        target = receipt_path(path)
+        temporary = target + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(merged, indent=2, sort_keys=True) + "\n")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, target)
+        complete = receipt_is_complete(merged)
+        if not complete:
+            worst = max(worst, EXIT_UNAVAILABLE)
+        _emit({"file": path, "upgraded": True, "self_bearing": complete}, args.json,
+              [("upgraded " if complete else "still incomplete ") + path]
+              + (["  this receipt now checks offline"] if complete
+                 else ["  the witness bundle is not published yet; try again after the hour"]))
+    return worst
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="verifyum",
@@ -858,8 +1110,18 @@ def main(argv=None) -> int:
 
     check = sub.add_parser("verify", help="check files against their receipts and the public record")
     check.add_argument("files", nargs="+")
+    check.add_argument("--offline", action="store_true",
+                       help="check using the receipt alone, contacting no one")
+    check.add_argument("--independent", action="store_true",
+                       help="also read the anchor from a public Solana RPC and compare the memo")
     check.add_argument("--json", action="store_true", help="machine readable output")
     check.set_defaults(handler=_cmd_verify)
+
+    upgrade = sub.add_parser("upgrade", help="fetch the evidence a receipt needs to stand alone")
+    upgrade.add_argument("files", nargs="+")
+    upgrade.add_argument("--force", action="store_true", help="refetch even if already complete")
+    upgrade.add_argument("--json", action="store_true", help="machine readable output")
+    upgrade.set_defaults(handler=_cmd_upgrade)
 
     witness = sub.add_parser("witness", help="check a proof against the witness layer")
     witness.add_argument("targets", nargs="+", metavar="FILE_OR_PROOF_ID")

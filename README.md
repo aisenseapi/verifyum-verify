@@ -85,6 +85,8 @@ Both give the same command:
 
     verifyum stamp contract.pdf
     verifyum verify contract.pdf
+    verifyum verify --offline --independent contract.pdf
+    verifyum upgrade contract.pdf
     verifyum witness contract.pdf
 
 `stamp` writes `contract.pdf.verifyum.json` beside the file, the way an
@@ -92,6 +94,18 @@ Both give the same command:
 original path. That receipt holds the nonce. It is the only thing tying your
 file to its public proof, Verifyum never has it, and losing it loses the
 link for good.
+
+`verify --offline` checks using the receipt alone and contacts no one. The
+receipt carries the signed metadata, the witness bundle with its Merkle path
+and the service key registry, about three kilobytes, so the file, the receipt
+and a SHA-256 implementation settle the question with this service gone. A
+receipt written in the minutes before its hourly checkpoint is published is
+thin; `verifyum upgrade` completes it, the way `ots upgrade` does, and says
+so rather than checking less.
+
+`verify --independent` additionally reads the anchor from a public Solana RPC
+and compares the memo itself, so the ledger answers rather than the operator.
+Set `VERIFYUM_SOLANA_RPC` to choose the endpoint.
 
 Exit codes are meant for a pipeline: 0 all good, 1 a check failed, 2 usage
 or file error, 3 the service was unavailable and it is worth retrying.
