@@ -18,6 +18,8 @@ path = "src/bin/check.rs"
 [dependencies]
 # preserve_order must stay OFF: the BTreeMap-backed Map gives the byte-ordered keys JCS needs.
 serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+# Traits only, for the duplicate-key visitor. Already a transitive dependency.
+serde = { version = "=1.0.229", default-features = false, features = ["std"] }
 sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
 # Verify only; no signing, no rand.
 ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std", "fast"] }

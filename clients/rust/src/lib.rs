@@ -8,6 +8,7 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use ed25519_dalek::{Signature, VerifyingKey};
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 use sha2::{Digest as _, Sha256};
 use std::fmt;
@@ -62,7 +63,85 @@ pub fn digest_bytes(s: &str) -> Result<[u8; 32], Error> {
 // R2: JCS
 
 pub fn parse_json(bytes: &[u8]) -> Result<Value, Error> {
-    serde_json::from_slice(bytes).map_err(|e| Error(format!("json parse: {e}")))
+    serde_json::from_slice::<Strict>(bytes)
+        .map(|Strict(value)| value)
+        .map_err(|e| Error(format!("json parse: {e}")))
+}
+
+// serde_json keeps the last of duplicate object keys, where the reference
+// rejects the document. "No published document has duplicate keys" is an
+// argument about today's data and not about an adversary, and two verifiers
+// that disagree on hostile input are worse than one. This visitor builds
+// the same Value tree serde_json would and fails on the first repeated key
+// at any depth. Numbers take the same i64/u64/f64 route as before; floats
+// are still refused further down, as they were.
+struct Strict(Value);
+
+impl<'de> Deserialize<'de> for Strict {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(StrictVisitor).map(Strict)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> Visitor<'de> for StrictVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
+        Ok(Value::from(v))
+    }
+
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::String(v.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, v: String) -> Result<Value, E> {
+        Ok(Value::String(v))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut out = Vec::new();
+        while let Some(Strict(value)) = seq.next_element()? {
+            out.push(value);
+        }
+        Ok(Value::Array(out))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut out = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let Strict(value) = map.next_value()?;
+            if out.insert(key.clone(), value).is_some() {
+                return Err(de::Error::custom(format!("duplicate object key {key:?}")));
+            }
+        }
+        Ok(Value::Object(out))
+    }
 }
 
 /// Canonical JSON bytes for `value`.

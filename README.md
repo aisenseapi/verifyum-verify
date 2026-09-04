@@ -205,12 +205,14 @@ The ports implement the hash rules and the signature check. They do not
 implement the reference's field-level validation of documents (exact key
 sets, canonical time round-trips, period arithmetic); a document that hashes
 correctly but is malformed in another way is caught by the reference, not by
-a port. The Go parser rejects duplicate object keys at any depth, as the reference
-does. The Rust parser still keeps the last of them, which is serde_json's
-default; a reviewer rightly pointed out that "no published document has
-duplicate keys" is an argument about today's data and not about an
-adversary, and that two verifiers disagreeing on hostile input is the failure
-class that matters here. The Rust fix is pending a toolchain to test it on.
+a port. Every port rejects duplicate object keys at any depth, as the reference
+does. Go walks the token stream in a separate pass; Rust deserializes
+through a visitor that fails on the first repeated key, since serde_json's
+default is to keep the last. An earlier README documented that default
+rather than fixing it, on the grounds that no published document has
+duplicate keys. A reviewer rightly pointed out that this is an argument
+about today's data and not about an adversary, and that two verifiers
+disagreeing on hostile input is the failure class that matters here.
 The Python signature check depends on the optional `cryptography` package.
 The shell verifier canonicalizes with `jq -cS`, which matches the reference
 on the documents published here but is not a general RFC 8785 encoder: it
