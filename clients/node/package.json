@@ -1,14 +1,28 @@
 {
   "name": "verifyum",
-  "version": "1.1.0",
-  "description": "Prove that a file existed, unchanged, at a point in time. No dependencies.",
+  "version": "1.2.0",
+  "description": "Proof a file existed unchanged at a point in time, witnessed by Bitcoin, a qualified eIDAS timestamp, Sigsum and Certificate Transparency. Verifies offline. No dependencies.",
   "keywords": [
     "timestamping",
+    "trusted-timestamp",
+    "rfc3161",
+    "eidas",
+    "qualified-timestamp",
+    "opentimestamps",
+    "bitcoin",
+    "sigsum",
+    "certificate-transparency",
+    "merkle",
     "proof-of-existence",
     "notarization",
     "provenance",
-    "solana",
-    "transparency"
+    "fixity",
+    "digital-preservation",
+    "archival",
+    "evidence",
+    "audit",
+    "transparency-log",
+    "solana"
   ],
   "homepage": "https://verifyum.com",
   "repository": {

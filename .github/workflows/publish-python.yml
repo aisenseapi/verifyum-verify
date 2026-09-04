@@ -1,0 +1,62 @@
+name: Publish the Python package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and stamp
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        working-directory: clients/python
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Stamp the artefacts with Verifyum
+        working-directory: clients/python/dist
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade verifyum
+          for artefact in *; do
+            case "$artefact" in *.verifyum.json) continue ;; esac
+            verifyum stamp "$artefact" || echo "stamping $artefact did not succeed"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distribution
+          path: clients/python/dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # Trusted Publishing: the token is minted for this run and expires
+      # with it. No API token is stored anywhere.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution
+          path: dist/
+      - name: Separate the receipts from what gets uploaded
+        run: |
+          mkdir -p receipts
+          mv dist/*.verifyum.json receipts/ 2>/dev/null || true
+          ls -l dist receipts || true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true

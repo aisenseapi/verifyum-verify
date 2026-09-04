@@ -4,13 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "verifyum"
-version = "1.1.0"
-description = "Prove that a file existed, unchanged, at a point in time. Standard library only."
+version = "1.2.0"
+description = "Proof a file existed unchanged at a point in time, witnessed by Bitcoin, a qualified eIDAS timestamp, Sigsum and Certificate Transparency. Verifies offline. No dependencies."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [ { name = "AI SENSE AS", email = "post@aisense.no" } ]
-keywords = ["timestamping", "proof-of-existence", "notarization", "provenance", "solana", "transparency"]
+keywords = [
+  "timestamping", "trusted-timestamp", "rfc3161", "eidas", "qualified-timestamp",
+  "opentimestamps", "bitcoin", "sigsum", "certificate-transparency", "merkle",
+  "proof-of-existence", "notarization", "provenance", "fixity", "digital-preservation",
+  "archival", "evidence", "audit", "transparency-log", "solana",
+]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",

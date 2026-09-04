@@ -3,6 +3,26 @@
 Prove that a file existed, unchanged, at a point in time. The file never
 leaves your machine: only a domain-separated commitment is sent.
 
+**Four independent records, none of them ours.** Every proof is folded into
+an hourly Merkle checkpoint, and each checkpoint is witnessed by
+
+- **OpenTimestamps into Bitcoin**, whose durability is a property of the
+  protocol: every full node holds every block;
+- a **qualified electronic timestamp under eIDAS Article 41(2)**, issued by
+  Sectigo (Europe) SL, whose qualified service is granted on Spain's EU
+  Trusted List, so the timestamp carries a legal presumption of accuracy
+  across the Union;
+- **Sigsum**, cosigned by witnesses run by Glasklar, Mullvad and Tillitis;
+- **Certificate Transparency**, one certificate per daily checkpoint whose
+  hostname encodes the checkpoint root.
+
+Four further records are the operator's own and are labelled as such, never
+counted as independent. A Solana Mainnet memo carries the commitment and
+gives finality in seconds; it is the fast confirmation, not the durable one.
+
+The eIDAS presumption covers the checkpoint root, not the contents of your
+file. All of it is spelled out at https://verifyum.com/witness
+
     npx verifyum stamp contract.pdf
     npx verifyum verify contract.pdf
 
