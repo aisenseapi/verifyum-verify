@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * Verifyum client, single file, no dependencies. Node.js 20+ or any modern
  * runtime with Web Crypto and fetch.
@@ -21,7 +22,7 @@ import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypt
 
 const API_BASE = globalThis.process?.env?.VERIFYUM_API_BASE ?? "https://api.verifyum.com";
 const PROOF_DOMAIN = globalThis.process?.env?.VERIFYUM_PROOF_DOMAIN ?? "verifyum.com";
-const USER_AGENT = "verifyum-js/1.2.0";
+const USER_AGENT = "verifyum-js/1.2.1";
 const PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
 
 export class VerifyumError extends Error {
