@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-channel-index-v1.json",
+  "title": "Verifyum Witness Layer channel evidence index version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "network",
+    "batch_id",
+    "checkpoint_kind",
+    "checkpoint_hash",
+    "checkpoint_url",
+    "channels"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-channel-index-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "network": { "enum": ["devnet", "mainnet-beta"] },
+    "batch_id": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}$"
+    },
+    "checkpoint_kind": { "enum": ["hourly", "daily"] },
+    "checkpoint_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "checkpoint_url": {
+      "type": "string",
+      "pattern": "^https://verifyum\\.com/witness/checkpoints/(hourly|daily)/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\\.json$"
+    },
+    "channels": {
+      "type": "array",
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "artifacts",
+          "attempts",
+          "channel",
+          "observed_at",
+          "provider_reference",
+          "reason",
+          "receipt_hash",
+          "receipt_url",
+          "state"
+        ],
+        "properties": {
+          "artifacts": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["digest", "kind", "media_type", "reference", "url"],
+              "properties": {
+                "digest": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "kind": {
+                  "enum": [
+                    "opentimestamps-receipt",
+                    "github-commit",
+                    "wayback-capture",
+                    "x509-leaf-certificate",
+                    "x509-issuing-chain",
+                    "ct-signed-certificate-timestamp",
+                    "ct-inclusion-proof",
+                    "ct-signed-tree-head",
+                    "rfc3161-timestamp-token",
+                    "rfc3161-trust-chain",
+                    "software-heritage-snapshot",
+                    "sigsum-leaf",
+                    "sigsum-inclusion-proof",
+                    "sigsum-cosigned-tree-head",
+                    "sigsum-trust-policy"
+                  ]
+                },
+                "media_type": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$"
+                },
+                "reference": {
+                  "oneOf": [
+                    { "type": "string", "minLength": 1, "maxLength": 2048 },
+                    { "type": "null" }
+                  ]
+                },
+                "url": {
+                  "type": "string",
+                  "pattern": "^https://verifyum\\.com/witness/evidence/(hourly|daily)/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}/[a-z-]+/[0-9a-f]{64}/artifacts/[0-9a-f]{64}$"
+                }
+              }
+            }
+          },
+          "attempts": { "type": "integer", "minimum": 1 },
+          "channel": {
+            "enum": [
+              "opentimestamps",
+              "github",
+              "wayback",
+              "certificate-transparency",
+              "eidas-timestamp",
+              "software-heritage",
+              "sigsum"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "provider_reference": {
+            "oneOf": [
+              { "type": "string", "minLength": 1, "maxLength": 2048 },
+              { "type": "null" }
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "enum": [
+                  "pending-confirmation",
+                  "provider-unavailable",
+                  "provider-refused",
+                  "invalid-response",
+                  "local-error"
+                ]
+              },
+              { "type": "null" }
+            ]
+          },
+          "receipt_hash": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "receipt_url": {
+            "type": "string",
+            "pattern": "^https://verifyum\\.com/witness/evidence/(hourly|daily)/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}/[a-z-]+/[0-9a-f]{64}/receipt\\.json$"
+          },
+          "state": {
+            "enum": ["pending", "confirmed", "unavailable", "failed"]
+          }
+        }
+      }
+    }
+  }
+}

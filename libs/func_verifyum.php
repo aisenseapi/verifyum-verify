@@ -589,7 +589,7 @@ function verifyum_stats_code_matches( string $submitted, string $expected ): boo
  */
 function verifyum_stats_locked_page( string $domain_dir, ?string $message ): string
 {
-    $path = rtrim( $domain_dir, '/\\' ) .'/static/stats-locked.html';
+    $path = rtrim( $domain_dir, '/\\' ) .'/resources/stats-locked.html';
     $page = @file_get_contents( $path );
     if ( !is_string( $page ) ){
         return "<!doctype html><title>Status</title><p>The status page is behind a code.";

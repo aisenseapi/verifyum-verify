@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-proof-chain-v1.json",
+  "title": "Verifyum public proof-to-daily witness chain version 1",
+  "description": "An immutable, privacy-bounded bridge from one proof's hourly membership to the daily checkpoint witnessed by the daily external channels. It contains no member list.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "network",
+    "proof_id",
+    "proof_membership",
+    "hourly_receipts_url",
+    "daily_checkpoint_url",
+    "daily_receipts_url",
+    "daily_checkpoint",
+    "daily_membership"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-proof-chain-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "network": { "enum": ["devnet", "mainnet-beta"] },
+    "proof_id": {
+      "type": "string",
+      "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$"
+    },
+    "proof_membership": {
+      "$ref": "https://verifyum.com/schema/witness-proof-membership-v1.json"
+    },
+    "hourly_receipts_url": {
+      "type": "string",
+      "pattern": "^https://verifyum\\.com/witness/receipts/hourly/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\\.json$"
+    },
+    "daily_checkpoint_url": {
+      "type": "string",
+      "pattern": "^https://verifyum\\.com/witness/checkpoints/daily/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\\.json$"
+    },
+    "daily_receipts_url": {
+      "type": "string",
+      "pattern": "^https://verifyum\\.com/witness/receipts/daily/[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\\.json$"
+    },
+    "daily_checkpoint": {
+      "$ref": "https://verifyum.com/schema/witness-checkpoint-v1.json"
+    },
+    "daily_membership": {
+      "$ref": "https://verifyum.com/schema/witness-membership-v1.json"
+    }
+  }
+}

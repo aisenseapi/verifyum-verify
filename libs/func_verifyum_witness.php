@@ -6,7 +6,10 @@ require_once __DIR__ .'/func_verifyum_services.php';
 const VERIFYUM_WITNESS_CHECKPOINT_SCHEMA = 'https://verifyum.com/schema/witness-checkpoint-v1.json';
 const VERIFYUM_WITNESS_MEMBERSHIP_SCHEMA = 'https://verifyum.com/schema/witness-membership-v1.json';
 const VERIFYUM_WITNESS_PROOF_MEMBERSHIP_SCHEMA = 'https://verifyum.com/schema/witness-proof-membership-v1.json';
+const VERIFYUM_WITNESS_PROOF_CHAIN_SCHEMA = 'https://verifyum.com/schema/witness-proof-chain-v1.json';
 const VERIFYUM_WITNESS_RECEIPT_SCHEMA = 'https://verifyum.com/schema/witness-channel-receipt-v1.json';
+const VERIFYUM_WITNESS_RECEIPT_INDEX_SCHEMA = 'https://verifyum.com/schema/witness-channel-index-v1.json';
+const VERIFYUM_WITNESS_STATUS_SCHEMA = 'https://verifyum.com/schema/witness-status-v1.json';
 const VERIFYUM_WITNESS_MERKLE_ALGORITHM = 'verifyum-sha256-merkle-v1';
 
 function verifyum_witness_digest( string $payload ): string
@@ -95,6 +98,197 @@ function verifyum_witness_public_checkpoint_url( array $checkpoint ): string
     verifyum_witness_validate_checkpoint( $checkpoint );
     return 'https://verifyum.com/witness/checkpoints/'. $checkpoint['kind'] .'/'
         . verifyum_witness_batch_id( $checkpoint ) .'.json';
+}
+
+function verifyum_witness_public_receipts_url( array $checkpoint ): string
+{
+    verifyum_witness_validate_checkpoint( $checkpoint );
+    return 'https://verifyum.com/witness/receipts/'. $checkpoint['kind'] .'/'
+        . verifyum_witness_batch_id( $checkpoint ) .'.json';
+}
+
+function verifyum_witness_public_channel_evidence_base_url(
+    array $checkpoint,
+    string $channel,
+    string $receipt_hash
+): string {
+    verifyum_witness_validate_checkpoint( $checkpoint );
+    if (
+        !in_array( $channel, verifyum_witness_channels(), true )
+        or verifyum_witness_channel_checkpoint_kind( $channel ) !== $checkpoint['kind']
+        or !verifyum_witness_valid_digest( $receipt_hash )
+    ){
+        throw new InvalidArgumentException( 'The public witness evidence identity is invalid' );
+    }
+    return 'https://verifyum.com/witness/evidence/'. $checkpoint['kind'] .'/'
+        . verifyum_witness_batch_id( $checkpoint ) .'/'. $channel .'/'
+        . substr( $receipt_hash, 7 );
+}
+
+function verifyum_witness_public_channel_receipt_url(
+    array $checkpoint,
+    string $channel,
+    string $receipt_hash
+): string {
+    return verifyum_witness_public_channel_evidence_base_url(
+        $checkpoint,
+        $channel,
+        $receipt_hash
+    ) .'/receipt.json';
+}
+
+function verifyum_witness_public_channel_artifact_url(
+    array $checkpoint,
+    string $channel,
+    string $receipt_hash,
+    string $artifact_digest
+): string {
+    if ( !verifyum_witness_valid_digest( $artifact_digest ) ){
+        throw new InvalidArgumentException( 'The public witness artifact digest is invalid' );
+    }
+    return verifyum_witness_public_channel_evidence_base_url(
+        $checkpoint,
+        $channel,
+        $receipt_hash
+    ) .'/artifacts/'. substr( $artifact_digest, 7 );
+}
+
+function verifyum_witness_public_channel_evidence_base_path(
+    string $store,
+    array $checkpoint,
+    string $channel,
+    string $receipt_hash
+): ?string {
+    try {
+        $relative = 'evidence/'. $checkpoint['kind'] .'/'
+            . verifyum_witness_batch_id( $checkpoint ) .'/'. $channel .'/'
+            . substr( $receipt_hash, 7 );
+        verifyum_witness_public_channel_evidence_base_url(
+            $checkpoint,
+            $channel,
+            $receipt_hash
+        );
+    } catch ( Throwable ){
+        return null;
+    }
+    return rtrim( $store, '/\\' ) .'/'. $relative;
+}
+
+function verifyum_witness_read_public_channel_receipt(
+    string $store,
+    array $checkpoint,
+    string $channel,
+    string $receipt_hash
+): ?array {
+    if ( is_link( $store ) or !is_dir( $store ) ){
+        return null;
+    }
+    $base = verifyum_witness_public_channel_evidence_base_path(
+        $store,
+        $checkpoint,
+        $channel,
+        $receipt_hash
+    );
+    if ( $base === null ){
+        return null;
+    }
+    $relative = substr( $base, strlen( rtrim( $store, '/\\' ) ) + 1 );
+    $current = rtrim( $store, '/\\' );
+    foreach ( explode( '/', $relative ) as $segment ){
+        $current .= '/'. $segment;
+        if ( is_link( $current ) or !is_dir( $current ) ){
+            return null;
+        }
+    }
+    $path = $base .'/receipt.json';
+    if ( is_link( $path ) or !is_file( $path ) or !is_readable( $path ) ){
+        return null;
+    }
+    $size = filesize( $path );
+    if ( !is_int( $size ) or $size < 2 or $size > 131072 ){
+        return null;
+    }
+    $document = file_get_contents( $path );
+    $receipt = is_string( $document ) ? json_decode( $document, true ) : null;
+    if ( !is_array( $receipt ) ){
+        return null;
+    }
+    try {
+        verifyum_witness_validate_channel_receipt( $receipt, $checkpoint );
+    } catch ( Throwable ){
+        return null;
+    }
+    if (
+        $receipt['channel'] !== $channel
+        or !hash_equals( $receipt['receipt_hash'], $receipt_hash )
+        or !hash_equals( verifyum_jcs_encode( $receipt ) ."\n", $document )
+    ){
+        return null;
+    }
+    return [ 'receipt'=>$receipt, 'document'=>$document ];
+}
+
+function verifyum_witness_read_public_channel_artifact(
+    string $store,
+    array $checkpoint,
+    string $channel,
+    string $receipt_hash,
+    string $artifact_digest
+): ?array {
+    if ( !verifyum_witness_valid_digest( $artifact_digest ) ){
+        return null;
+    }
+    $published = verifyum_witness_read_public_channel_receipt(
+        $store,
+        $checkpoint,
+        $channel,
+        $receipt_hash
+    );
+    if ( $published === null ){
+        return null;
+    }
+    $artifact = null;
+    foreach ( $published['receipt']['artifacts'] as $candidate ){
+        if ( hash_equals( $candidate['digest'], $artifact_digest ) ){
+            $artifact = $candidate;
+            break;
+        }
+    }
+    if ( !is_array( $artifact ) ){
+        return null;
+    }
+    $base = verifyum_witness_public_channel_evidence_base_path(
+        $store,
+        $checkpoint,
+        $channel,
+        $receipt_hash
+    );
+    if ( $base === null ){
+        return null;
+    }
+    $directory = $base .'/artifacts';
+    $path = $directory .'/'. substr( $artifact_digest, 7 );
+    if (
+        is_link( $directory )
+        or !is_dir( $directory )
+        or is_link( $path )
+        or !is_file( $path )
+        or !is_readable( $path )
+    ){
+        return null;
+    }
+    $size = filesize( $path );
+    if ( !is_int( $size ) or $size < 1 or $size > 4194304 ){
+        return null;
+    }
+    $bytes = file_get_contents( $path );
+    if (
+        !is_string( $bytes )
+        or !hash_equals( $artifact_digest, verifyum_witness_digest( $bytes ) )
+    ){
+        return null;
+    }
+    return [ 'artifact'=>$artifact, 'bytes'=>$bytes ];
 }
 
 function verifyum_witness_read_public_checkpoint(
@@ -300,6 +494,182 @@ function verifyum_witness_read_public_proof_membership(
     return [ 'bundle'=>$bundle, 'document'=>$document ];
 }
 
+function verifyum_witness_public_proof_chain_path( string $store, string $proof_id ): ?string
+{
+    $membership_path = verifyum_metadata_path( $store, $proof_id );
+    if ( $membership_path === null ){
+        return null;
+    }
+    return substr( $membership_path, 0, -5 ) .'.chain.json';
+}
+
+/**
+ * Validates the immutable, per-proof bridge from its hourly checkpoint into
+ * the daily aggregate. The bundle deliberately carries only the requested
+ * proof's two Merkle paths; it never lists siblings or other proof IDs.
+ */
+function verifyum_witness_validate_public_proof_chain( array $bundle ): void
+{
+    if (
+        !verifyum_witness_exact_fields(
+            $bundle,
+            [
+                'schema',
+                'protocol',
+                'version',
+                'network',
+                'proof_id',
+                'proof_membership',
+                'hourly_receipts_url',
+                'daily_checkpoint_url',
+                'daily_receipts_url',
+                'daily_checkpoint',
+                'daily_membership',
+            ]
+        )
+        or $bundle['schema'] !== VERIFYUM_WITNESS_PROOF_CHAIN_SCHEMA
+        or $bundle['protocol'] !== 'verifyum'
+        or $bundle['version'] !== 1
+        or !in_array( $bundle['network'], [ 'devnet', 'mainnet-beta' ], true )
+        or !verifyum_valid_proof_id( $bundle['proof_id'] )
+        or !is_array( $bundle['proof_membership'] )
+        or !is_string( $bundle['hourly_receipts_url'] )
+        or !is_string( $bundle['daily_checkpoint_url'] )
+        or !is_string( $bundle['daily_receipts_url'] )
+        or !is_array( $bundle['daily_checkpoint'] )
+        or !is_array( $bundle['daily_membership'] )
+    ){
+        throw new InvalidArgumentException( 'The public witness proof chain is invalid' );
+    }
+
+    verifyum_witness_validate_public_proof_membership( $bundle['proof_membership'] );
+    verifyum_witness_validate_checkpoint( $bundle['daily_checkpoint'], 'daily' );
+    verifyum_witness_validate_membership(
+        $bundle['daily_membership'],
+        $bundle['daily_checkpoint']
+    );
+
+    $hourly_checkpoint = $bundle['proof_membership']['checkpoint'];
+    $hourly_start = strtotime( $hourly_checkpoint['period_start'] );
+    $hourly_end = strtotime( $hourly_checkpoint['period_end'] );
+    $daily_start = strtotime( $bundle['daily_checkpoint']['period_start'] );
+    $daily_end = strtotime( $bundle['daily_checkpoint']['period_end'] );
+    if (
+        $bundle['network'] !== $bundle['proof_membership']['network']
+        or $bundle['network'] !== $bundle['daily_checkpoint']['network']
+        or $bundle['proof_id'] !== $bundle['proof_membership']['proof_id']
+        or $bundle['daily_membership']['subject_type'] !== 'hourly-checkpoint-v1'
+        or !hash_equals(
+            $hourly_checkpoint['checkpoint_hash'],
+            (string)$bundle['daily_membership']['subject_id']
+        )
+        or !hash_equals(
+            verifyum_witness_checkpoint_leaf_hash( $hourly_checkpoint ),
+            $bundle['daily_membership']['leaf_hash']
+        )
+        or !hash_equals(
+            verifyum_witness_public_receipts_url( $hourly_checkpoint ),
+            $bundle['hourly_receipts_url']
+        )
+        or !hash_equals(
+            verifyum_witness_public_checkpoint_url( $bundle['daily_checkpoint'] ),
+            $bundle['daily_checkpoint_url']
+        )
+        or !hash_equals(
+            verifyum_witness_public_receipts_url( $bundle['daily_checkpoint'] ),
+            $bundle['daily_receipts_url']
+        )
+        or !is_int( $hourly_start )
+        or !is_int( $hourly_end )
+        or !is_int( $daily_start )
+        or !is_int( $daily_end )
+        or $hourly_start < $daily_start
+        or $hourly_end > $daily_end
+    ){
+        throw new InvalidArgumentException( 'The public witness proof chain is inconsistent' );
+    }
+}
+
+function verifyum_witness_build_public_proof_chain(
+    array $hourly_checkpoint,
+    array $proof_membership,
+    array $daily_checkpoint,
+    array $daily_membership
+): array {
+    $proof_bundle = verifyum_witness_build_public_proof_membership(
+        $hourly_checkpoint,
+        $proof_membership
+    );
+    $bundle = [
+        'schema'=>VERIFYUM_WITNESS_PROOF_CHAIN_SCHEMA,
+        'protocol'=>'verifyum',
+        'version'=>1,
+        'network'=>$hourly_checkpoint['network'],
+        'proof_id'=>$proof_membership['subject_id'],
+        'proof_membership'=>$proof_bundle,
+        'hourly_receipts_url'=>verifyum_witness_public_receipts_url( $hourly_checkpoint ),
+        'daily_checkpoint_url'=>verifyum_witness_public_checkpoint_url( $daily_checkpoint ),
+        'daily_receipts_url'=>verifyum_witness_public_receipts_url( $daily_checkpoint ),
+        'daily_checkpoint'=>$daily_checkpoint,
+        'daily_membership'=>$daily_membership,
+    ];
+    verifyum_witness_validate_public_proof_chain( $bundle );
+    return $bundle;
+}
+
+function verifyum_witness_public_proof_chain_document( array $bundle ): string
+{
+    verifyum_witness_validate_public_proof_chain( $bundle );
+    return verifyum_jcs_encode( $bundle ) ."\n";
+}
+
+function verifyum_witness_read_public_proof_chain(
+    string $store,
+    string $proof_id
+): ?array {
+    if ( !verifyum_valid_proof_id( $proof_id ) or is_link( $store ) or !is_dir( $store ) ){
+        return null;
+    }
+    $path = verifyum_witness_public_proof_chain_path( $store, $proof_id );
+    if ( $path === null ){
+        return null;
+    }
+    $first_shard = dirname( dirname( $path ) );
+    $second_shard = dirname( $path );
+    if (
+        is_link( $first_shard )
+        or !is_dir( $first_shard )
+        or is_link( $second_shard )
+        or !is_dir( $second_shard )
+        or is_link( $path )
+        or !is_file( $path )
+        or !is_readable( $path )
+    ){
+        return null;
+    }
+    $size = filesize( $path );
+    if ( !is_int( $size ) or $size < 2 or $size > 262144 ){
+        return null;
+    }
+    $document = file_get_contents( $path );
+    $bundle = is_string( $document ) ? json_decode( $document, true ) : null;
+    if ( !is_array( $bundle ) ){
+        return null;
+    }
+    try {
+        verifyum_witness_validate_public_proof_chain( $bundle );
+    } catch ( Throwable ){
+        return null;
+    }
+    if (
+        $bundle['proof_id'] !== $proof_id
+        or !hash_equals( verifyum_witness_public_proof_chain_document( $bundle ), $document )
+    ){
+        return null;
+    }
+    return [ 'bundle'=>$bundle, 'document'=>$document ];
+}
+
 function verifyum_witness_sort_artifacts( array $artifacts ): array
 {
     usort( $artifacts, static function ( array $left, array $right ): int {
@@ -323,6 +693,24 @@ const VERIFYUM_WITNESS_CHANNEL_KINDS = [
     'eidas-timestamp'=>'daily',
     'software-heritage'=>'daily',
     'sigsum'=>'daily',
+];
+
+const VERIFYUM_WITNESS_ARTIFACT_KINDS = [
+    'opentimestamps-receipt',
+    'github-commit',
+    'wayback-capture',
+    'x509-leaf-certificate',
+    'x509-issuing-chain',
+    'ct-signed-certificate-timestamp',
+    'ct-inclusion-proof',
+    'ct-signed-tree-head',
+    'rfc3161-timestamp-token',
+    'rfc3161-trust-chain',
+    'software-heritage-snapshot',
+    'sigsum-leaf',
+    'sigsum-inclusion-proof',
+    'sigsum-cosigned-tree-head',
+    'sigsum-trust-policy',
 ];
 
 function verifyum_witness_channels(): array
@@ -421,29 +809,12 @@ function verifyum_witness_validate_channel_receipt( array $receipt, ?array $chec
         throw new InvalidArgumentException( 'The witness channel receipt chain is invalid' );
     }
 
-    $artifact_kinds = [
-        'opentimestamps-receipt',
-        'github-commit',
-        'wayback-capture',
-        'x509-leaf-certificate',
-        'x509-issuing-chain',
-        'ct-signed-certificate-timestamp',
-        'ct-inclusion-proof',
-        'ct-signed-tree-head',
-        'rfc3161-timestamp-token',
-        'rfc3161-trust-chain',
-        'software-heritage-snapshot',
-        'sigsum-leaf',
-        'sigsum-inclusion-proof',
-        'sigsum-cosigned-tree-head',
-        'sigsum-trust-policy',
-    ];
     $artifact_ids = [];
     foreach ( $receipt['artifacts'] as $artifact ){
         if (
             !is_array( $artifact )
             or !verifyum_witness_exact_fields( $artifact, [ 'kind', 'digest', 'media_type', 'reference' ] )
-            or !in_array( $artifact['kind'], $artifact_kinds, true )
+            or !in_array( $artifact['kind'], VERIFYUM_WITNESS_ARTIFACT_KINDS, true )
             or !verifyum_witness_valid_digest( $artifact['digest'] )
             or !is_string( $artifact['media_type'] )
             or preg_match( '/\A[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*\z/', $artifact['media_type'] ) !== 1
@@ -1940,3 +2311,231 @@ function verifyum_activity_series(
         'truncated'=>$truncated,
     ];
 }
+
+/**
+ * Computes the public channel health and freshness summary.
+ * Reads the public witness receipts store to find the latest confirmed
+ * state and timestamp for each channel, comparing the age against channel cadence.
+ */
+function verifyum_witness_public_channel_status(
+    string $receipt_store,
+    ?int $now = null
+): array {
+    $now = $now ?? time();
+    $channel_meta = [
+        'opentimestamps' => [
+            'display_name' => 'OpenTimestamps on Bitcoin',
+            'tier' => 'independent',
+            'kind' => 'hourly',
+            'cadence_seconds' => 3600,
+            'max_allowed_lag' => 172800,
+        ],
+        'eidas-timestamp' => [
+            'display_name' => 'Qualified EU timestamp',
+            'tier' => 'independent',
+            'kind' => 'daily',
+            'cadence_seconds' => 86400,
+            'max_allowed_lag' => 21600,
+        ],
+        'sigsum' => [
+            'display_name' => 'Sigsum log',
+            'tier' => 'independent',
+            'kind' => 'daily',
+            'cadence_seconds' => 86400,
+            'max_allowed_lag' => 21600,
+        ],
+        'certificate-transparency' => [
+            'display_name' => 'Certificate Transparency',
+            'tier' => 'independent',
+            'kind' => 'daily',
+            'cadence_seconds' => 86400,
+            'max_allowed_lag' => 21600,
+        ],
+        'github' => [
+            'display_name' => 'GitHub checkpoint log',
+            'tier' => 'operator',
+            'kind' => 'hourly',
+            'cadence_seconds' => 3600,
+            'max_allowed_lag' => 10800,
+        ],
+        'wayback' => [
+            'display_name' => 'Internet Archive',
+            'tier' => 'operator',
+            'kind' => 'hourly',
+            'cadence_seconds' => 3600,
+            'max_allowed_lag' => 10800,
+        ],
+        'software-heritage' => [
+            'display_name' => 'Software Heritage',
+            'tier' => 'operator',
+            'kind' => 'daily',
+            'cadence_seconds' => 86400,
+            'max_allowed_lag' => 21600,
+        ],
+    ];
+
+    $statuses = [];
+    foreach ( $channel_meta as $name => $meta ){
+        $statuses[$name] = [
+            'channel' => $name,
+            'display_name' => $meta['display_name'],
+            'tier' => $meta['tier'],
+            'checkpoint_kind' => $meta['kind'],
+            'cadence_seconds' => $meta['cadence_seconds'],
+            'state' => 'unknown',
+            'health' => 'unknown',
+            'caught_up' => false,
+            'latest_batch_id' => null,
+            'latest_observed_at' => null,
+            'latest_confirmed_at' => null,
+            'age_seconds' => null,
+            'receipt_url' => null,
+            'provider_reference' => null,
+        ];
+    }
+
+    // The newest checkpoint of each kind that actually exists. A channel can
+    // only witness what has been published, so this, not the wall clock, is
+    // what its freshness has to be measured against.
+    $newest_batch = [ 'hourly' => null, 'daily' => null ];
+
+    foreach ( [ 'hourly', 'daily' ] as $kind ){
+        $batches = verifyum_witness_list_batches( $receipt_store, $kind );
+        if ( $batches !== [] ){
+            $newest_batch[ $kind ] = $batches[0];
+        }
+        $scanned = 0;
+        foreach ( $batches as $batch_id ){
+            $scanned++;
+            if ( $scanned > 24 ){
+                break;
+            }
+            $receipt = verifyum_witness_read_public_receipts( $receipt_store, $kind, $batch_id );
+            if ( $receipt === null ){
+                continue;
+            }
+            $summary = $receipt['summary'] ?? null;
+            if ( !is_array( $summary ) or !is_array( $summary['channels'] ?? null ) ){
+                continue;
+            }
+            foreach ( $summary['channels'] as $entry ){
+                if ( !is_array( $entry ) ){
+                    continue;
+                }
+                $ch = (string)( $entry['channel'] ?? '' );
+                if ( !isset( $statuses[$ch] ) ){
+                    continue;
+                }
+                if ( $statuses[$ch]['latest_batch_id'] === null ){
+                    $statuses[$ch]['latest_batch_id'] = $batch_id;
+                    $statuses[$ch]['receipt_url'] = isset( $entry['receipt_url'] ) ? (string)$entry['receipt_url'] : null;
+                    $statuses[$ch]['latest_observed_at'] = isset( $entry['observed_at'] ) ? (string)$entry['observed_at'] : null;
+                    $statuses[$ch]['provider_reference'] = isset( $entry['provider_reference'] ) && is_string( $entry['provider_reference'] ) ? $entry['provider_reference'] : null;
+                    $statuses[$ch]['state'] = (string)( $entry['state'] ?? 'unknown' );
+                }
+                if ( ( $entry['state'] ?? '' ) === 'confirmed' and $statuses[$ch]['latest_confirmed_at'] === null ){
+                    $statuses[$ch]['latest_confirmed_at'] = isset( $entry['observed_at'] ) ? (string)$entry['observed_at'] : null;
+                }
+            }
+        }
+    }
+
+    foreach ( $statuses as $name => &$info ){
+        $meta = $channel_meta[$name];
+        $confirmed_time = $info['latest_confirmed_at'] !== null ? strtotime( $info['latest_confirmed_at'] ) : null;
+        // A checkpoint is only built for a period that had something to
+        // aggregate, so a quiet service publishes nothing and every channel
+        // drifts past its deadline while nothing at all is wrong. Judged by
+        // the wall clock this page called six of seven channels lagging on a
+        // day when each had confirmed every checkpoint in existence. The
+        // alerting already asks the right question, per published checkpoint,
+        // so ask it here too: a channel that has confirmed the newest
+        // checkpoint of its kind is current, however long ago that was.
+        $info['caught_up'] = $newest_batch[ $meta['kind'] ] !== null
+            && $info['latest_batch_id'] === $newest_batch[ $meta['kind'] ];
+        if ( is_int( $confirmed_time ) ){
+            $age = max( 0, $now - $confirmed_time );
+            $info['age_seconds'] = $age;
+            $allowed_lag = $meta['cadence_seconds'] + $meta['max_allowed_lag'];
+            if ( $info['caught_up'] or $age <= $allowed_lag ){
+                $info['health'] = 'healthy';
+            } else {
+                $info['health'] = 'lagging';
+            }
+        } else {
+            if ( $info['state'] === 'pending' ){
+                $info['health'] = 'pending';
+            } elseif ( $info['state'] === 'failed' ){
+                $info['health'] = 'failed';
+            } else {
+                $info['health'] = 'unreported';
+            }
+        }
+    }
+    unset( $info );
+
+    // Per-channel health now answers "has this channel witnessed everything
+    // published?". That leaves a second question unanswered, and a stopped
+    // publisher would hide inside the first: if nothing is published, every
+    // channel is trivially current. So state plainly how fresh the published
+    // record itself is, and let the reader judge both.
+    $latest_checkpoints = [];
+    foreach ( [ 'hourly', 'daily' ] as $kind ){
+        $batch_id = $newest_batch[ $kind ];
+        $period_start = null;
+        if ( is_string( $batch_id ) and preg_match( '/\A([0-9]{8})T([0-9]{6})Z-/', $batch_id, $stamp ) === 1 ){
+            $parsed = strtotime(
+                substr( $stamp[1], 0, 4 ) .'-'. substr( $stamp[1], 4, 2 ) .'-'. substr( $stamp[1], 6, 2 )
+                .'T'. substr( $stamp[2], 0, 2 ) .':'. substr( $stamp[2], 2, 2 ) .':'. substr( $stamp[2], 4, 2 ) .'Z'
+            );
+            $period_start = $parsed === false ? null : verifyum_service_iso_time( $parsed );
+        }
+        $latest_checkpoints[ $kind ] = [
+            'batch_id' => $batch_id,
+            'period_start' => $period_start,
+        ];
+    }
+
+    return [
+        'schema' => VERIFYUM_WITNESS_STATUS_SCHEMA,
+        'protocol' => 'verifyum',
+        'version' => 1,
+        'generated_at' => verifyum_service_iso_time( $now ),
+        'latest_checkpoints' => $latest_checkpoints,
+        'channels' => array_values( $statuses ),
+    ];
+}
+
+/**
+ * Caches the channel status summary so that repeated status requests do not
+ * scan disk repeatedly.
+ */
+function verifyum_witness_cached_channel_status(
+    string $receipt_store,
+    string $cache_path,
+    int $max_age_seconds = 60,
+    ?int $now = null
+): array {
+    $now = $now ?? time();
+    if ( !is_link( $cache_path ) and is_file( $cache_path ) ){
+        $stamped = @filemtime( $cache_path );
+        if ( is_int( $stamped ) and ( $now - $stamped ) < $max_age_seconds ){
+            $cached = @file_get_contents( $cache_path );
+            $decoded = is_string( $cached ) ? json_decode( $cached, true ) : null;
+            if ( is_array( $decoded ) and ( $decoded['protocol'] ?? null ) === 'verifyum' ){
+                return $decoded;
+            }
+        }
+    }
+
+    $status = verifyum_witness_public_channel_status( $receipt_store, $now );
+    $directory = dirname( $cache_path );
+    if ( is_dir( $directory ) and is_writable( $directory ) ){
+        $temp = $cache_path .'.tmp.'. bin2hex( random_bytes( 4 ) );
+        if ( @file_put_contents( $temp, json_encode( $status, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) ) !== false ){
+            @rename( $temp, $cache_path );
+        }
+    }
+    return $status;
+}
+

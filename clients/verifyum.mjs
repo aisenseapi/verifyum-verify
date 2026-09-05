@@ -22,7 +22,7 @@ import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypt
 
 const API_BASE = globalThis.process?.env?.VERIFYUM_API_BASE ?? "https://api.verifyum.com";
 const PROOF_DOMAIN = globalThis.process?.env?.VERIFYUM_PROOF_DOMAIN ?? "verifyum.com";
-const USER_AGENT = "verifyum-js/1.2.1";
+const USER_AGENT = "verifyum-js/1.3.0";
 const PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
 
 export class VerifyumError extends Error {
@@ -191,6 +191,7 @@ export async function verify(proofId, data, draft) {
 
 const REGISTRY_URL = `https://${PROOF_DOMAIN}/.well-known/verifyum-service-keys.json`;
 const CHECKPOINT_URL_PREFIX = `https://${PROOF_DOMAIN}/witness/checkpoints/`;
+const RECEIPTS_URL_PREFIX = `https://${PROOF_DOMAIN}/witness/receipts/`;
 const DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const PROOF_ID_PATTERN = /^[0-7][0-9a-hjkmnp-tv-z]{25}$/;
 const CANONICAL_TIME_PATTERN = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/;
@@ -534,6 +535,43 @@ export function validateWitnessBundle(bundle) {
   return bundle;
 }
 
+/**
+ * The additive proof -> hourly -> daily bridge. The version 1 proof bundle
+ * remains untouched and is embedded byte-for-byte, so old clients keep
+ * working while new clients can reach the daily witness channels.
+ */
+export function validateWitnessChain(chain, expectedBundle = null) {
+  requireExactKeys(chain, [
+    "schema", "protocol", "version", "network", "proof_id", "proof_membership",
+    "hourly_receipts_url", "daily_checkpoint_url", "daily_receipts_url",
+    "daily_checkpoint", "daily_membership",
+  ], "witness chain");
+  if (chain.schema !== "https://verifyum.com/schema/witness-proof-chain-v1.json") fail("witness chain schema is not witness-proof-chain-v1");
+  if (chain.protocol !== "verifyum" || chain.version !== 1) fail("witness chain is not verifyum version 1");
+  validateWitnessBundle(chain.proof_membership);
+  validateCheckpoint(chain.daily_checkpoint);
+  validateMembership(chain.daily_membership, chain.daily_checkpoint);
+
+  const hourly = chain.proof_membership.checkpoint;
+  const daily = chain.daily_checkpoint;
+  if (daily.kind !== "daily" || daily.subject_type !== "hourly-checkpoint-v1") fail("witness chain daily checkpoint has the wrong kind");
+  if (chain.network !== chain.proof_membership.network || chain.network !== daily.network) fail("witness chain mixes networks");
+  if (chain.proof_id !== chain.proof_membership.proof_id) fail("witness chain proof_id differs from its proof membership");
+  if (chain.daily_membership.subject_id !== hourly.checkpoint_hash) fail("daily membership does not name the hourly checkpoint hash");
+  if (chain.daily_membership.leaf_hash !== checkpointLeafHash(hourly)) fail("daily membership leaf is not derived from the hourly checkpoint hash");
+
+  const hourlyBatch = checkpointBatchId(hourly);
+  const dailyBatch = checkpointBatchId(daily);
+  if (chain.hourly_receipts_url !== `${RECEIPTS_URL_PREFIX}hourly/${hourlyBatch}.json`) fail("hourly receipts URL is not canonical");
+  if (chain.daily_checkpoint_url !== `${CHECKPOINT_URL_PREFIX}daily/${dailyBatch}.json`) fail("daily checkpoint URL is not canonical");
+  if (chain.daily_receipts_url !== `${RECEIPTS_URL_PREFIX}daily/${dailyBatch}.json`) fail("daily receipts URL is not canonical");
+  if (unixSeconds(hourly.period_start) < unixSeconds(daily.period_start) || unixSeconds(hourly.period_end) > unixSeconds(daily.period_end)) {
+    fail("hourly checkpoint is outside the daily checkpoint period");
+  }
+  if (expectedBundle !== null && jcs(chain.proof_membership) !== jcs(expectedBundle)) fail("witness chain does not embed the published proof membership exactly");
+  return chain;
+}
+
 /* ---- Whole-proof verification ---- */
 
 function attempt(checks, name, run) {
@@ -551,7 +589,7 @@ function attempt(checks, name, run) {
  * optional raw body of `bundle.checkpoint_url`; when given it must equal the
  * canonical document byte for byte.
  */
-export function verifyWitnessDocuments({ proofId, metadata, bundle, registry = null, publishedCheckpoint = null }) {
+export function verifyWitnessDocuments({ proofId, metadata, bundle, chain = null, registry = null, publishedCheckpoint = null }) {
   const checks = { problems: [] };
   attempt(checks, "metadata_valid", () => {
     validateProofMetadata(metadata);
@@ -577,6 +615,9 @@ export function verifyWitnessDocuments({ proofId, metadata, bundle, registry = n
       if (!Buffer.from(publishedCheckpoint).equals(checkpointDocument(bundle.checkpoint))) fail("published bytes differ from the canonical document");
     });
   }
+  if (chain !== null) {
+    attempt(checks, "daily_chain_valid", () => validateWitnessChain(chain, bundle));
+  }
 
   const { problems, ...results } = checks;
   return {
@@ -590,6 +631,10 @@ export function verifyWitnessDocuments({ proofId, metadata, bundle, registry = n
     checkpoint_url: bundle?.checkpoint_url ?? null,
     leaf_index: bundle?.membership?.leaf_index ?? null,
     leaf_count: bundle?.membership?.leaf_count ?? null,
+    daily_witnessed: chain !== null,
+    daily_checkpoint_hash: chain?.daily_checkpoint?.checkpoint_hash ?? null,
+    hourly_receipts_url: chain?.hourly_receipts_url ?? null,
+    daily_receipts_url: chain?.daily_receipts_url ?? null,
     boundary: WITNESS_BOUNDARY_STATEMENT,
   };
 }
@@ -623,11 +668,17 @@ export async function verifyWitness(proofId, { registryUrl = REGISTRY_URL } = {}
     throw error;
   }
   const registry = parseDocument(await fetchBytes(registryUrl));
+  let chain = null;
+  try {
+    chain = parseDocument(await fetchBytes(`${base}/.well-known/verifyum-witness-chain.json`));
+  } catch (error) {
+    if (!(error instanceof VerifyumError && error.status === 404)) throw error;
+  }
   // Only follow a checkpoint URL on our own host; the bundle is data, not a place to send requests.
   const publishedCheckpoint = typeof bundle.checkpoint_url === "string" && bundle.checkpoint_url.startsWith(CHECKPOINT_URL_PREFIX)
     ? await fetchBytes(bundle.checkpoint_url)
     : null;
-  return verifyWitnessDocuments({ proofId, metadata, bundle, registry, publishedCheckpoint });
+  return verifyWitnessDocuments({ proofId, metadata, bundle, chain, registry, publishedCheckpoint });
 }
 
 // ---------------------------------------------------------------------------
@@ -643,7 +694,7 @@ export async function verifyWitness(proofId, { registryUrl = REGISTRY_URL } = {}
 // written by either client checks with the other.
 // ---------------------------------------------------------------------------
 
-export const RECEIPT_VERSION = 3;
+export const RECEIPT_VERSION = 4;
 
 const SOLANA_RPC = globalThis.process?.env?.VERIFYUM_SOLANA_RPC ?? "https://api.mainnet-beta.solana.com";
 
@@ -659,6 +710,7 @@ export async function fetchEvidence(proofId) {
   };
   await collect("metadata", `${base}/.well-known/verifyum.json`);
   await collect("witness_bundle", `${base}/.well-known/verifyum-witnesses.json`);
+  await collect("witness_chain", `${base}/.well-known/verifyum-witness-chain.json`);
   await collect("service_keys", REGISTRY_URL);
   return evidence;
 }
@@ -668,6 +720,15 @@ export function receiptIsComplete(receipt) {
   return ["metadata", "witness_bundle", "service_keys"].every(
     (part) => receipt?.[part] !== null && typeof receipt?.[part] === "object"
   );
+}
+
+/** True once the optional daily bridge has also been captured. */
+export function receiptHasDailyChain(receipt) {
+  return receipt?.witness_chain !== null && typeof receipt?.witness_chain === "object";
+}
+
+function receiptVersion(receipt) {
+  return receiptHasDailyChain(receipt) ? RECEIPT_VERSION : 3;
 }
 
 /** The exact memo the anchor carries, rebuilt rather than trusted. */
@@ -708,6 +769,7 @@ export async function verifyOffline(data, receipt) {
     proofId: metadata.proof_id,
     metadata,
     bundle: receipt.witness_bundle,
+    chain: receipt.witness_chain ?? null,
     registry: receipt.service_keys,
   });
   Object.assign(checks, witness.checks);
@@ -818,7 +880,7 @@ async function writeReceipt(fs, path, proof, evidence) {
   const document = {
     schema: "https://verifyum.com/schema/receipt-v1.json",
     protocol: "verifyum",
-    version: RECEIPT_VERSION,
+    version: receiptVersion(evidence ?? {}),
     proof_id: proof.proof_id ?? null,
     commitment: proof.commitment ?? null,
     status: proof.status ?? null,
@@ -953,19 +1015,21 @@ export async function main(argv) {
     if (command === "upgrade") {
       try {
         const receipt = await readReceipt(fs, target);
-        if (receiptIsComplete(receipt) && !flags.has("--force")) {
-          emit({ file: target, upgraded: false, self_bearing: true }, asJson, ["already complete  " + target]);
+        if (receiptIsComplete(receipt) && receiptHasDailyChain(receipt) && !flags.has("--force")) {
+          emit({ file: target, upgraded: false, self_bearing: true, daily_chain: true }, asJson, ["already complete  " + target]);
           continue;
         }
-        const merged = { ...receipt, ...(await fetchEvidence(receipt.proof_id)), version: RECEIPT_VERSION };
+        const merged = { ...receipt, ...(await fetchEvidence(receipt.proof_id)) };
+        merged.version = receiptVersion(merged);
         const temporary = receiptPath(target) + ".tmp";
         await fs.writeFile(temporary, JSON.stringify(merged, null, 2) + "\n", { mode: 0o600 });
         await fs.rename(temporary, receiptPath(target));
         const complete = receiptIsComplete(merged);
         if (!complete) { worst = Math.max(worst, EXIT_UNAVAILABLE); }
-        emit({ file: target, upgraded: true, self_bearing: complete }, asJson,
+        emit({ file: target, upgraded: true, self_bearing: complete, daily_chain: receiptHasDailyChain(merged) }, asJson,
           [(complete ? "upgraded " : "still incomplete ") + target,
-           complete ? "  this receipt now checks offline"
+           complete && receiptHasDailyChain(merged) ? "  this receipt now links offline through the daily checkpoint"
+                    : complete ? "  hourly evidence complete; daily checkpoint is not published yet"
                     : "  the witness bundle is not published yet; try again after the hour"]);
       } catch (error) {
         fail(error instanceof VerifyumError ? EXIT_UNAVAILABLE : EXIT_USAGE, error.message);

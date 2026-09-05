@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/receipt-v1.json",
+  "title": "Verifyum client receipt",
+  "description": "The file `verifyum stamp` writes beside a stamped file, as <file>.verifyum.json. It holds the private draft, whose nonce is the only thing tying the file to its public proof and which Verifyum never has. A complete receipt also carries the signed proof metadata, the hourly witness bundle, the service key registry and, in version 4, the per-proof bridge into the daily checkpoint and its external-channel receipts. `verifyum verify --offline` then verifies both Merkle paths without contacting Verifyum. Written by the Python and Node clients; the two read each other's receipts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol", "version", "proof_id", "commitment", "private_draft"],
+  "properties": {
+    "schema": { "const": "https://verifyum.com/schema/receipt-v1.json" },
+    "protocol": { "const": "verifyum" },
+    "version": {
+      "description": "2 holds only the draft and proof id. 3 may carry metadata, the hourly witness_bundle and service_keys. 4 also carries witness_chain, the additive per-proof bridge from that hourly checkpoint into a daily checkpoint. Old versions remain valid.",
+      "enum": [2, 3, 4]
+    },
+    "proof_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$"
+    },
+    "commitment": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "status": {
+      "description": "The anchor status at the time the receipt was written. The public record is authoritative; this is a note.",
+      "type": ["string", "null"]
+    },
+    "proof_url": {
+      "type": ["string", "null"],
+      "format": "uri"
+    },
+    "private_draft": {
+      "description": "The half Verifyum never sees. Treat it like a key.",
+      "type": "object",
+      "required": ["manifest", "commitment"],
+      "properties": {
+        "manifest": { "$ref": "https://verifyum.com/schema/manifest-v2.json" },
+        "commitment": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "format": { "const": "verifyum-private-draft" },
+        "version": { "const": 2 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "anchor_result": { "type": "object" }
+      }
+    },
+    "metadata": {
+      "description": "The signed public proof document, so the receipt can be checked with the operator gone.",
+      "$ref": "https://verifyum.com/schema/proof-v2.json"
+    },
+    "witness_bundle": {
+      "description": "The Merkle path from the proof to its hourly checkpoint, and that checkpoint.",
+      "$ref": "https://verifyum.com/schema/witness-proof-membership-v1.json"
+    },
+    "witness_chain": {
+      "description": "The exact hourly witness bundle plus the Merkle path from its checkpoint hash into the daily checkpoint. It contains no checkpoint member list.",
+      "$ref": "https://verifyum.com/schema/witness-proof-chain-v1.json"
+    },
+    "service_keys": {
+      "description": "The Ed25519 key registry the service signature is checked against.",
+      "$ref": "https://verifyum.com/schema/service-key-registry-v1.json"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "version": { "const": 4 } },
+        "required": ["version"]
+      },
+      "then": {
+        "required": ["metadata", "witness_bundle", "witness_chain", "service_keys"]
+      }
+    },
+    {
+      "if": { "required": ["witness_chain"] },
+      "then": { "properties": { "version": { "const": 4 } } }
+    }
+  ]
+}

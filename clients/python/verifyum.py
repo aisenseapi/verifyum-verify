@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import calendar
 import hashlib
 import json
 import os
@@ -58,11 +59,12 @@ __all__ = [
     "verify_service_signature",
     "verify_witness",
     "verify_witness_documents",
+    "verify_witness_chain_documents",
 ]
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
-USER_AGENT = "verifyum-python/1.2.1"
+USER_AGENT = "verifyum-python/1.3.0"
 
 # Ed25519 verification is built in, so "standard library only" is true of the
 # whole verifier and not only of the hashing. cryptography is used when it is
@@ -186,6 +188,8 @@ CHECKPOINT_PREFIX = b"verifyum:witness:checkpoint:v1\n"
 PROOF_LEAF_PREFIX = b"\x00verifyum:witness:proof-leaf:v1\n"
 CHECKPOINT_LEAF_PREFIX = b"\x00verifyum:witness:checkpoint-leaf:v1\n"
 NODE_PREFIX = b"\x01verifyum:witness:node:v1\n"
+CHECKPOINT_URL_PREFIX = f"https://{PROOF_DOMAIN}/witness/checkpoints/"
+RECEIPTS_URL_PREFIX = f"https://{PROOF_DOMAIN}/witness/receipts/"
 
 
 class VerifyumError(RuntimeError):
@@ -552,24 +556,6 @@ def verify(proof_id: str, data: bytes, draft: dict) -> dict:
 # --- Witness Layer verification ----------------------------------------------
 
 
-def verify_witness(proof_id: str) -> dict:
-    """Fetches the metadata, the witness bundle and the key registry, then
-    recomputes the leaf, the Merkle path, the checkpoint hash and the
-    service signature. Network access is limited to verifyum.com.
-    """
-    if not isinstance(proof_id, str) or not PROOF_ID_RE.fullmatch(proof_id):
-        raise VerifyumError("invalid proof id")
-    metadata = _request("GET", f"https://{proof_id}.{PROOF_DOMAIN}/.well-known/verifyum.json")["body"]
-    bundle = _request("GET", f"/v2/proofs/{proof_id}/witnesses")["body"]
-    registry = _request("GET", f"https://{PROOF_DOMAIN}/.well-known/verifyum-service-keys.json")["body"]
-    result = verify_witness_documents(metadata, bundle, registry)
-    if bundle.get("proof_id") != proof_id or result["checks"].get("subject_id") != proof_id:
-        result["checks"]["subject_matches"] = False
-        result["valid"] = False
-    result["checks"].pop("subject_id", None)
-    return result
-
-
 def _batch_id(checkpoint: dict) -> str | None:
     period_start = checkpoint.get("period_start")
     if not isinstance(period_start, str) or not BATCH_TIME_RE.fullmatch(period_start):
@@ -579,7 +565,196 @@ def _batch_id(checkpoint: dict) -> str | None:
     return period_start.replace("-", "").replace(":", "") + "-" + checkpoint["checkpoint_hash"][7:]
 
 
-def verify_witness_documents(metadata, bundle, registry) -> dict:
+_CHECKPOINT_FIELDS = {
+    "schema", "protocol", "version", "kind", "network", "period_start",
+    "period_end", "created_at", "algorithm", "subject_type", "subject_count",
+    "merkle_root", "previous_checkpoint_hash", "checkpoint_hash",
+}
+_MEMBERSHIP_FIELDS = {
+    "schema", "protocol", "version", "checkpoint_kind", "checkpoint_hash",
+    "subject_type", "subject_id", "leaf_hash", "leaf_index", "leaf_count", "path",
+}
+_CHAIN_FIELDS = {
+    "schema", "protocol", "version", "network", "proof_id", "proof_membership",
+    "hourly_receipts_url", "daily_checkpoint_url", "daily_receipts_url",
+    "daily_checkpoint", "daily_membership",
+}
+
+
+def _checkpoint_valid(checkpoint: dict, kind: str) -> bool:
+    if not isinstance(checkpoint, dict) or set(checkpoint) != _CHECKPOINT_FIELDS:
+        return False
+    expected_subject = "proof-v2" if kind == "hourly" else "hourly-checkpoint-v1"
+    if (
+        checkpoint.get("schema") != "https://verifyum.com/schema/witness-checkpoint-v1.json"
+        or checkpoint.get("protocol") != "verifyum"
+        or checkpoint.get("version") != 1
+        or checkpoint.get("kind") != kind
+        or checkpoint.get("network") not in ("devnet", "mainnet-beta")
+        or checkpoint.get("algorithm") != "verifyum-sha256-merkle-v1"
+        or checkpoint.get("subject_type") != expected_subject
+        or not isinstance(checkpoint.get("subject_count"), int)
+        or isinstance(checkpoint.get("subject_count"), bool)
+        or checkpoint["subject_count"] < 1
+        or not is_digest(checkpoint.get("merkle_root"))
+        or not is_digest(checkpoint.get("checkpoint_hash"))
+        or checkpoint.get("previous_checkpoint_hash") is not None
+        and not is_digest(checkpoint.get("previous_checkpoint_hash"))
+    ):
+        return False
+    for field in ("period_start", "period_end", "created_at"):
+        if not isinstance(checkpoint.get(field), str) or not BATCH_TIME_RE.fullmatch(checkpoint[field]):
+            return False
+    try:
+        start = calendar.timegm(time.strptime(checkpoint["period_start"], "%Y-%m-%dT%H:%M:%SZ"))
+        end = calendar.timegm(time.strptime(checkpoint["period_end"], "%Y-%m-%dT%H:%M:%SZ"))
+        created = calendar.timegm(time.strptime(checkpoint["created_at"], "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return False
+    duration = 3600 if kind == "hourly" else 86400
+    return (
+        start % duration == 0
+        and end - start == duration
+        and created >= end
+        and checkpoint_hash(checkpoint) == checkpoint["checkpoint_hash"]
+    )
+
+
+def _membership_valid(membership: dict, checkpoint: dict) -> bool:
+    if not isinstance(membership, dict) or set(membership) != _MEMBERSHIP_FIELDS:
+        return False
+    count = checkpoint.get("subject_count")
+    index = membership.get("leaf_index")
+    subject_id = membership.get("subject_id")
+    subject_type = checkpoint.get("subject_type")
+    if subject_type == "proof-v2":
+        subject_valid = isinstance(subject_id, str) and PROOF_ID_RE.fullmatch(subject_id) is not None
+    else:
+        subject_valid = is_digest(subject_id)
+    return (
+        membership.get("schema") == "https://verifyum.com/schema/witness-membership-v1.json"
+        and membership.get("protocol") == "verifyum"
+        and membership.get("version") == 1
+        and membership.get("checkpoint_kind") == checkpoint.get("kind")
+        and membership.get("checkpoint_hash") == checkpoint.get("checkpoint_hash")
+        and membership.get("subject_type") == subject_type
+        and subject_valid
+        and is_digest(membership.get("leaf_hash"))
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and membership.get("leaf_count") == count
+        and isinstance(index, int)
+        and not isinstance(index, bool)
+        and 0 <= index < count
+        and verify_path(membership["leaf_hash"], membership.get("path"), checkpoint.get("merkle_root"))
+    )
+
+
+def verify_witness_chain_documents(bundle: dict, chain: dict) -> dict:
+    """Verifies the additive proof -> hourly -> daily bridge offline.
+
+    It binds the daily leaf to the exact hourly checkpoint hash, validates
+    both Merkle paths and accepts only deterministic Verifyum URLs. No member
+    list is needed or exposed.
+    """
+    checks = {
+        "chain_shape": isinstance(chain, dict) and set(chain) == _CHAIN_FIELDS,
+    }
+    if not checks["chain_shape"]:
+        return {"valid": False, "checks": checks}
+
+    proof_membership = chain.get("proof_membership")
+    hourly = proof_membership.get("checkpoint") if isinstance(proof_membership, dict) else None
+    proof_path = proof_membership.get("membership") if isinstance(proof_membership, dict) else None
+    daily = chain.get("daily_checkpoint")
+    daily_path = chain.get("daily_membership")
+    try:
+        embedded_bundle_matches = (
+            isinstance(bundle, dict)
+            and isinstance(proof_membership, dict)
+            and jcs(proof_membership) == jcs(bundle)
+        )
+    except (TypeError, ValueError):
+        embedded_bundle_matches = False
+    checks["chain_identity"] = (
+        chain.get("schema") == "https://verifyum.com/schema/witness-proof-chain-v1.json"
+        and chain.get("protocol") == "verifyum"
+        and chain.get("version") == 1
+        and embedded_bundle_matches
+        and chain.get("proof_id") == proof_membership.get("proof_id")
+    )
+    checks["hourly_checkpoint_valid"] = _checkpoint_valid(hourly, "hourly")
+    checks["hourly_membership_valid"] = (
+        checks["hourly_checkpoint_valid"] and _membership_valid(proof_path, hourly)
+    )
+    checks["daily_checkpoint_valid"] = _checkpoint_valid(daily, "daily")
+    checks["daily_membership_valid"] = (
+        checks["daily_checkpoint_valid"] and _membership_valid(daily_path, daily)
+    )
+
+    if checks["hourly_checkpoint_valid"] and checks["daily_checkpoint_valid"]:
+        hourly_batch = _batch_id(hourly)
+        daily_batch = _batch_id(daily)
+        checks["networks_match"] = (
+            chain.get("network") == proof_membership.get("network") == hourly.get("network") == daily.get("network")
+        )
+        checks["daily_leaf_matches_hourly"] = (
+            isinstance(daily_path, dict)
+            and daily_path.get("subject_type") == "hourly-checkpoint-v1"
+            and daily_path.get("subject_id") == hourly.get("checkpoint_hash")
+            and daily_path.get("leaf_hash") == checkpoint_leaf_hash(hourly)
+        )
+        checks["urls_canonical"] = (
+            chain.get("hourly_receipts_url") == f"{RECEIPTS_URL_PREFIX}hourly/{hourly_batch}.json"
+            and chain.get("daily_checkpoint_url") == f"{CHECKPOINT_URL_PREFIX}daily/{daily_batch}.json"
+            and chain.get("daily_receipts_url") == f"{RECEIPTS_URL_PREFIX}daily/{daily_batch}.json"
+        )
+        checks["period_contains_hourly"] = (
+            daily.get("period_start") <= hourly.get("period_start")
+            and hourly.get("period_end") <= daily.get("period_end")
+        )
+    else:
+        checks.update({
+            "networks_match": False,
+            "daily_leaf_matches_hourly": False,
+            "urls_canonical": False,
+            "period_contains_hourly": False,
+        })
+
+    return {
+        "valid": all(value is True for value in checks.values()),
+        "checks": checks,
+        "daily_checkpoint_hash": daily.get("checkpoint_hash") if isinstance(daily, dict) else None,
+        "hourly_receipts_url": chain.get("hourly_receipts_url"),
+        "daily_receipts_url": chain.get("daily_receipts_url"),
+    }
+
+
+def verify_witness(proof_id: str) -> dict:
+    """Fetches and verifies the proof, hourly membership and optional daily
+    bridge. A missing daily bridge means the daily checkpoint is not due yet;
+    it does not invalidate the already witnessed hourly proof.
+    """
+    if not isinstance(proof_id, str) or not PROOF_ID_RE.fullmatch(proof_id):
+        raise VerifyumError("invalid proof id")
+    metadata = _request("GET", f"https://{proof_id}.{PROOF_DOMAIN}/.well-known/verifyum.json")["body"]
+    bundle = _request("GET", f"/v2/proofs/{proof_id}/witnesses")["body"]
+    chain = None
+    try:
+        chain = _request("GET", f"/v2/proofs/{proof_id}/witness-chain")["body"]
+    except VerifyumError as error:
+        if error.status != 404:
+            raise
+    registry = _request("GET", f"https://{PROOF_DOMAIN}/.well-known/verifyum-service-keys.json")["body"]
+    result = verify_witness_documents(metadata, bundle, registry, chain)
+    if bundle.get("proof_id") != proof_id or result["checks"].get("subject_id") != proof_id:
+        result["checks"]["subject_matches"] = False
+        result["valid"] = False
+    result["checks"].pop("subject_id", None)
+    return result
+
+
+def verify_witness_documents(metadata, bundle, registry, chain=None) -> dict:
     """Offline core of `verify_witness`: same checks over already-fetched
     documents. `bundle` is the witness-proof-membership-v1 document.
     """
@@ -644,6 +819,10 @@ def verify_witness_documents(metadata, bundle, registry) -> dict:
         == f"https://verifyum.com/witness/checkpoints/{checkpoint.get('kind')}/{batch_id}.json"
     )
     checks["service_signature_valid"] = verify_service_signature(metadata, registry)
+    daily_result = None
+    if chain is not None:
+        daily_result = verify_witness_chain_documents(bundle, chain)
+        checks["daily_chain_valid"] = daily_result["valid"]
 
     decided = [value for value in checks.values() if value is not None]
     return {
@@ -654,6 +833,10 @@ def verify_witness_documents(metadata, bundle, registry) -> dict:
         "checkpoint_url": bundle.get("checkpoint_url"),
         "network": checkpoint.get("network"),
         "period_end": checkpoint.get("period_end"),
+        "daily_witnessed": daily_result is not None,
+        "daily_checkpoint_hash": (daily_result or {}).get("daily_checkpoint_hash"),
+        "hourly_receipts_url": (daily_result or {}).get("hourly_receipts_url"),
+        "daily_receipts_url": (daily_result or {}).get("daily_receipts_url"),
         "boundary": "Shows that the proof metadata was included in a checkpoint no later than "
         "period_end and that the checkpoint is the one the external witnesses hold. "
         "Not authorship, ownership, or that the contents are true.",
@@ -667,14 +850,15 @@ def verify_witness_documents(metadata, bundle, registry) -> dict:
 # at verifyum.com. That made the holder depend on our uptime for the life of
 # the claim, which is the opposite of what the product promises and unlike
 # the .ots file it was modelled on. A receipt now carries the signed
-# metadata, the witness bundle with its Merkle path, and the key registry:
-# about three kilobytes, after which no request to us is needed to check it.
+# metadata, the witness bundle with its Merkle path, the key registry and,
+# once the daily checkpoint exists, the additive bridge into its external
+# receipts. No request to us is then needed to check either Merkle path.
 #
 # What still cannot be carried is the ledger. `verify --independent` reads
 # the transaction from a public Solana RPC and compares the memo itself.
 # --------------------------------------------------------------------------
 
-RECEIPT_VERSION = 3
+RECEIPT_VERSION = 4
 
 SOLANA_RPC = os.environ.get("VERIFYUM_SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 
@@ -707,6 +891,12 @@ def fetch_evidence(proof_id: str) -> dict:
     except VerifyumError:
         pass
     try:
+        evidence["witness_chain"] = _request(
+            "GET", f"/v2/proofs/{proof_id}/witness-chain"
+        )["body"]
+    except VerifyumError:
+        pass
+    try:
         evidence["service_keys"] = _request(
             "GET", f"https://{PROOF_DOMAIN}/.well-known/verifyum-service-keys.json"
         )["body"]
@@ -721,6 +911,16 @@ def receipt_is_complete(receipt: dict) -> bool:
         isinstance(receipt.get(part), dict)
         for part in ("metadata", "witness_bundle", "service_keys")
     )
+
+
+def receipt_has_daily_chain(receipt: dict) -> bool:
+    """True once the receipt also carries the hourly-to-daily bridge."""
+    return isinstance(receipt.get("witness_chain"), dict)
+
+
+def receipt_version(receipt: dict) -> int:
+    """Preserves v3 until the additive daily witness document is present."""
+    return RECEIPT_VERSION if receipt_has_daily_chain(receipt) else 3
 
 
 def verify_offline(data: bytes, receipt: dict) -> dict:
@@ -748,7 +948,10 @@ def verify_offline(data: bytes, receipt: dict) -> dict:
         "anchor_finalized": metadata.get("anchor", {}).get("status") == "finalized",
     }
     witness = verify_witness_documents(
-        metadata, receipt["witness_bundle"], receipt["service_keys"]
+        metadata,
+        receipt["witness_bundle"],
+        receipt["service_keys"],
+        receipt.get("witness_chain"),
     )
     checks.update(witness["checks"])
     checks.pop("subject_id", None)
@@ -881,7 +1084,7 @@ def write_receipt(path: str, proof: dict, evidence: dict | None = None) -> str:
     document = {
         "schema": "https://verifyum.com/schema/receipt-v1.json",
         "protocol": "verifyum",
-        "version": RECEIPT_VERSION,
+        "version": receipt_version(evidence or {}),
         "proof_id": proof.get("proof_id"),
         "commitment": proof.get("commitment"),
         "status": proof.get("status"),
@@ -1057,8 +1260,8 @@ def _cmd_upgrade(args) -> int:
             print("verifyum: " + str(error), file=sys.stderr)
             worst = max(worst, EXIT_USAGE)
             continue
-        if receipt_is_complete(receipt) and not args.force:
-            _emit({"file": path, "upgraded": False, "self_bearing": True}, args.json,
+        if receipt_is_complete(receipt) and receipt_has_daily_chain(receipt) and not args.force:
+            _emit({"file": path, "upgraded": False, "self_bearing": True, "daily_chain": True}, args.json,
                   ["already complete  " + path])
             continue
         try:
@@ -1069,7 +1272,7 @@ def _cmd_upgrade(args) -> int:
             continue
         merged = dict(receipt)
         merged.update(evidence)
-        merged["version"] = RECEIPT_VERSION
+        merged["version"] = receipt_version(merged)
         target = receipt_path(path)
         temporary = target + ".tmp"
         with open(temporary, "w", encoding="utf-8") as handle:
@@ -1082,9 +1285,12 @@ def _cmd_upgrade(args) -> int:
         complete = receipt_is_complete(merged)
         if not complete:
             worst = max(worst, EXIT_UNAVAILABLE)
-        _emit({"file": path, "upgraded": True, "self_bearing": complete}, args.json,
+        _emit({"file": path, "upgraded": True, "self_bearing": complete, "daily_chain": receipt_has_daily_chain(merged)}, args.json,
               [("upgraded " if complete else "still incomplete ") + path]
-              + (["  this receipt now checks offline"] if complete
+              + (["  this receipt now links offline through the daily checkpoint"]
+                 if complete and receipt_has_daily_chain(merged)
+                 else ["  hourly evidence complete; daily checkpoint is not published yet"]
+                 if complete
                  else ["  the witness bundle is not published yet; try again after the hour"]))
     return worst
 

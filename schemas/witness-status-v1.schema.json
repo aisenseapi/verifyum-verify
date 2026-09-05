@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-status-v1.json",
+  "title": "Verifyum Witness Layer channel status version 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "generated_at",
+    "latest_checkpoints",
+    "channels"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-status-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "latest_checkpoints": {
+      "description": "The newest checkpoint of each kind that exists. Channel health says whether a channel has witnessed everything published; this says how fresh what was published is. A quiet period publishes no checkpoint, which is normal and is why channel health is not measured against the wall clock.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hourly", "daily"],
+      "properties": {
+        "hourly": { "$ref": "#/$defs/latestCheckpoint" },
+        "daily": { "$ref": "#/$defs/latestCheckpoint" }
+      }
+    },
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "channel",
+          "display_name",
+          "tier",
+          "checkpoint_kind",
+          "cadence_seconds",
+          "state",
+          "health",
+          "caught_up",
+          "latest_batch_id",
+          "latest_observed_at",
+          "latest_confirmed_at",
+          "age_seconds",
+          "receipt_url",
+          "provider_reference"
+        ],
+        "properties": {
+          "channel": {
+            "enum": [
+              "opentimestamps",
+              "eidas-timestamp",
+              "sigsum",
+              "certificate-transparency",
+              "github",
+              "wayback",
+              "software-heritage"
+            ]
+          },
+          "display_name": { "type": "string" },
+          "tier": { "enum": ["independent", "operator"] },
+          "checkpoint_kind": { "enum": ["hourly", "daily"] },
+          "cadence_seconds": { "type": "integer", "minimum": 60 },
+          "state": { "enum": ["confirmed", "pending", "unavailable", "failed", "unknown"] },
+          "health": { "enum": ["healthy", "pending", "lagging", "failed", "unreported", "unknown"] },
+          "caught_up": {
+            "description": "True when this channel has confirmed the newest checkpoint of its kind that exists. A channel that is caught up is healthy however long ago that checkpoint was, because a quiet period publishes nothing to witness.",
+            "type": "boolean"
+          },
+          "latest_batch_id": {
+            "oneOf": [
+              { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}$" },
+              { "type": "null" }
+            ]
+          },
+          "latest_observed_at": {
+            "oneOf": [
+              { "type": "string", "format": "date-time" },
+              { "type": "null" }
+            ]
+          },
+          "latest_confirmed_at": {
+            "oneOf": [
+              { "type": "string", "format": "date-time" },
+              { "type": "null" }
+            ]
+          },
+          "age_seconds": {
+            "oneOf": [
+              { "type": "integer", "minimum": 0 },
+              { "type": "null" }
+            ]
+          },
+          "receipt_url": {
+            "oneOf": [
+              { "type": "string", "format": "uri" },
+              { "type": "null" }
+            ]
+          },
+          "provider_reference": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "null" }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "latestCheckpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batch_id", "period_start"],
+      "properties": {
+        "batch_id": {
+          "description": "Null when no checkpoint of this kind has been published yet.",
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}$" },
+            { "type": "null" }
+          ]
+        },
+        "period_start": {
+          "oneOf": [
+            { "type": "string", "format": "date-time" },
+            { "type": "null" }
+          ]
+        }
+      }
+    }
+  }
+}
