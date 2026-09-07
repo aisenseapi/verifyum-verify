@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://verifyum.com/schema/receipt-v1.json",
   "title": "Verifyum client receipt",
-  "description": "The file `verifyum stamp` writes beside a stamped file, as <file>.verifyum.json. It holds the private draft, whose nonce is the only thing tying the file to its public proof and which Verifyum never has. A complete receipt also carries the signed proof metadata, the hourly witness bundle, the service key registry and, in version 4, the per-proof bridge into the daily checkpoint and its external-channel receipts. `verifyum verify --offline` then verifies both Merkle paths without contacting Verifyum. Written by the Python and Node clients; the two read each other's receipts.",
+  "description": "The file `verifyum stamp` writes beside a stamped file, as <file>.verifyum.json. It holds the private draft, whose nonce is the only thing tying the file to its public proof and which Verifyum never has. A complete receipt also carries the signed proof metadata, the hourly witness bundle, the service key registry and, in version 4, the per-proof bridge into the daily checkpoint and its external-channel receipts. `verifyum verify --offline` then checks both Merkle paths and both checkpoints for consistency, and the signature against the registry, without contacting Verifyum. Checkpoints are unsigned, so their publication is shown at the URLs the receipt names, not offline. Written by the Python and Node clients; the two read each other's receipts.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema", "protocol", "version", "proof_id", "commitment", "private_draft"],

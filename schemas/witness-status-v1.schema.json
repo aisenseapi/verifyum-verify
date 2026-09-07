@@ -47,6 +47,7 @@
           "health",
           "caught_up",
           "latest_batch_id",
+          "confirmed_batch_id",
           "latest_observed_at",
           "latest_confirmed_at",
           "age_seconds",
@@ -76,6 +77,14 @@
             "type": "boolean"
           },
           "latest_batch_id": {
+            "description": "The newest checkpoint this channel appears in, whatever it said there. Appearing is not confirming: compare with confirmed_batch_id.",
+            "oneOf": [
+              { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}$" },
+              { "type": "null" }
+            ]
+          },
+          "confirmed_batch_id": {
+            "description": "The newest checkpoint this channel actually confirmed, which latest_confirmed_at belongs to. When it differs from latest_batch_id the channel has been seen more recently than it has succeeded.",
             "oneOf": [
               { "type": "string", "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}$" },
               { "type": "null" }

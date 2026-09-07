@@ -64,7 +64,16 @@ __all__ = [
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
-USER_AGENT = "verifyum-python/1.3.0"
+USER_AGENT = "verifyum-python/1.3.1"
+WITNESS_OFFLINE_SCOPE = (
+    "Offline, the witness checks show that the receipt's checkpoints, Merkle "
+    "paths and signed metadata agree with each other, that the service "
+    "signature verifies against the registry, and that no checkpoint predates "
+    "the proof. Checkpoints are unsigned, so whether a checkpoint was published "
+    "and witnessed is shown by the published checkpoint document or a channel "
+    "receipt at the URLs the receipt names, or by the ledger for the anchor; "
+    "not by an offline check."
+)
 
 # Ed25519 verification is built in, so "standard library only" is true of the
 # whole verifier and not only of the hashing. cryptography is used when it is
@@ -565,6 +574,37 @@ def _batch_id(checkpoint: dict) -> str | None:
     return period_start.replace("-", "").replace(":", "") + "-" + checkpoint["checkpoint_hash"][7:]
 
 
+def _parse_time(value) -> int | None:
+    if not isinstance(value, str) or not BATCH_TIME_RE.fullmatch(value):
+        return None
+    try:
+        return calendar.timegm(time.strptime(value, "%Y-%m-%dT%H:%M:%SZ"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def _checkpoint_after_proof(checkpoint: dict, metadata: dict) -> bool:
+    """A checkpoint cannot predate the proof it contains.
+
+    Nothing signs a checkpoint, so offline a receipt could carry one written
+    by its holder: an internally consistent hourly checkpoint dated 2020
+    verified as valid in both clients. The one bound the proof's own signed
+    metadata gives is time. The worker creates a checkpoint after collecting
+    the proof, so created_at is at or after submitted_at and the anchor's
+    block time; the period itself is no bound, since a proof finalized at
+    five past the hour lands in the checkpoint for the hour just ended.
+    """
+    created = _parse_time(checkpoint.get("created_at"))
+    submitted = _parse_time(metadata.get("submitted_at"))
+    block_time = _parse_time((metadata.get("anchor") or {}).get("block_time"))
+    return (
+        created is not None
+        and submitted is not None
+        and created >= submitted
+        and (block_time is None or created >= block_time)
+    )
+
+
 _CHECKPOINT_FIELDS = {
     "schema", "protocol", "version", "kind", "network", "period_start",
     "period_end", "created_at", "algorithm", "subject_type", "subject_count",
@@ -818,6 +858,7 @@ def verify_witness_documents(metadata, bundle, registry, chain=None) -> dict:
         and bundle.get("checkpoint_url")
         == f"https://verifyum.com/witness/checkpoints/{checkpoint.get('kind')}/{batch_id}.json"
     )
+    checks["checkpoint_after_proof"] = _checkpoint_after_proof(checkpoint, metadata)
     checks["service_signature_valid"] = verify_service_signature(metadata, registry)
     daily_result = None
     if chain is not None:
@@ -967,6 +1008,7 @@ def verify_offline(data: bytes, receipt: dict) -> dict:
         "transaction_signature": metadata.get("anchor", {}).get("transaction_signature"),
         "network": metadata.get("anchor", {}).get("network"),
         "offline": True,
+        "witness_scope": WITNESS_OFFLINE_SCOPE,
     }
 
 
@@ -1212,7 +1254,10 @@ def _cmd_verify(args) -> int:
                     else "the receipt and " + str(result.get("chain_source")) if args.offline
                     else "verifyum.com" + (" and " + str(result.get("chain_source")) if args.independent else "")
                 ),
-            ] + (["  failed  " + ", ".join(failed)] if failed else []),
+            ] + ([
+                "  witness consistent offline; whether the checkpoint was published is shown",
+                "          at the URLs the receipt names, not here (checkpoints are unsigned)",
+            ] if args.offline else []) + (["  failed  " + ", ".join(failed)] if failed else []),
         )
     return worst
 

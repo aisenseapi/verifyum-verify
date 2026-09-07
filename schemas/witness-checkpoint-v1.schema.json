@@ -44,6 +44,7 @@
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
     "previous_checkpoint_hash": {
+      "description": "The checkpoint_hash of the previous checkpoint of the same kind, or null for the first one. Hourly and daily checkpoints keep separate chains.",
       "oneOf": [
         {
           "type": "string",
@@ -53,6 +54,7 @@
       ]
     },
     "checkpoint_hash": {
+      "description": "Lowercase hex SHA-256 over the UTF-8 prefix verifyum:witness:checkpoint:v1 followed by one newline, then the RFC 8785 (JCS) canonical serialization of this document with the checkpoint_hash member removed. It is not the hash of the document bytes as served, and no serialization other than JCS reproduces it.",
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     }

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/proof-announcement-v1.json",
+  "title": "Verifyum proof announcement version 1",
+  "description": "Where one finalized proof was announced, served at /announce/<proof id>. It carries only what a public link needs: the proof id, when the announcement was made and the public URL on each platform. Absence of this document says nothing about the proof, which stands on its own evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "protocol", "version", "proof_id", "announced_at", "announcements"],
+  "properties": {
+    "schema": { "const": "https://verifyum.com/schema/proof-announcement-v1.json" },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "proof_id": {
+      "type": "string",
+      "pattern": "^[0-7][0-9a-hjkmnp-tv-z]{25}$"
+    },
+    "announced_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "announcements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "url"],
+        "properties": {
+          "kind": {
+            "description": "The platform, as a short lowercase name such as telegram.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,31}$"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://"
+          }
+        }
+      }
+    }
+  }
+}

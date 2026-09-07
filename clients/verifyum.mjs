@@ -22,7 +22,7 @@ import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypt
 
 const API_BASE = globalThis.process?.env?.VERIFYUM_API_BASE ?? "https://api.verifyum.com";
 const PROOF_DOMAIN = globalThis.process?.env?.VERIFYUM_PROOF_DOMAIN ?? "verifyum.com";
-const USER_AGENT = "verifyum-js/1.3.0";
+const USER_AGENT = "verifyum-js/1.3.1";
 const PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
 
 export class VerifyumError extends Error {
@@ -209,6 +209,13 @@ const MAX_PATH_LENGTH = 64;
 export const WITNESS_BOUNDARY_STATEMENT =
   "A witnessed proof shows that its public metadata was included in a checkpoint that independent " +
   "third parties observed. It does not prove authorship, ownership, or that the file contents are true.";
+
+export const WITNESS_OFFLINE_SCOPE =
+  "Offline, the witness checks show that the receipt's checkpoints, Merkle paths and signed metadata agree " +
+  "with each other, that the service signature verifies against the registry, and that no checkpoint " +
+  "predates the proof. Checkpoints are unsigned, so whether a checkpoint was published and witnessed is " +
+  "shown by the published checkpoint document or a channel receipt at the URLs the receipt names, or by " +
+  "the ledger for the anchor; not by an offline check.";
 
 const utf8 = (text) => Buffer.from(text, "utf8");
 const sha256Raw = (bytes) => createHash("sha256").update(bytes).digest();
@@ -610,6 +617,18 @@ export function verifyWitnessDocuments({ proofId, metadata, bundle, chain = null
   attempt(checks, "path_matches_checkpoint", () => {
     if (!verifyPath(bundle?.membership?.leaf_hash, bundle?.membership?.path, bundle?.checkpoint?.merkle_root)) fail("path does not reach merkle_root");
   });
+  // A checkpoint cannot predate the proof it contains. Nothing signs a
+  // checkpoint, so offline a receipt could carry one its holder wrote; the
+  // proof's own signed times are the one bound left. The period is no bound:
+  // a proof finalized at five past the hour lands in the checkpoint for the
+  // hour just ended, so created_at is what is compared.
+  attempt(checks, "checkpoint_after_proof", () => {
+    if (!isCanonicalTime(bundle?.checkpoint?.created_at) || !isCanonicalTime(metadata?.submitted_at)) fail("checkpoint or proof time is not a canonical time");
+    const created = unixSeconds(bundle.checkpoint.created_at);
+    if (created < unixSeconds(metadata.submitted_at)) fail("checkpoint.created_at precedes the proof's submitted_at");
+    const blockTime = metadata?.anchor?.block_time;
+    if (blockTime != null && (!isCanonicalTime(blockTime) || created < unixSeconds(blockTime))) fail("checkpoint.created_at precedes the anchor block time");
+  });
   if (publishedCheckpoint !== null) {
     attempt(checks, "published_checkpoint_matches", () => {
       if (!Buffer.from(publishedCheckpoint).equals(checkpointDocument(bundle.checkpoint))) fail("published bytes differ from the canonical document");
@@ -782,6 +801,7 @@ export async function verifyOffline(data, receipt) {
     transaction_signature: metadata.anchor?.transaction_signature ?? null,
     network: metadata.anchor?.network ?? null,
     offline: true,
+    witness_scope: WITNESS_OFFLINE_SCOPE,
   };
 }
 
@@ -889,7 +909,17 @@ async function writeReceipt(fs, path, proof, evidence) {
     ...(evidence ?? {}),
   };
   const temporary = target + ".tmp";
-  await fs.writeFile(temporary, JSON.stringify(document, Object.keys(document).sort(), 2) + "\n", { mode: 0o600 });
+  // The second argument of JSON.stringify is a replacer, and an array there is
+  // an allow-list of key names applied at EVERY depth, not a top-level
+  // ordering. Passing the document's own top-level keys therefore deleted
+  // every nested key that did not happen to share a name with one of them: the
+  // receipt lost private_draft.manifest, and with it the nonce, which is the
+  // only thing tying the file to its proof. A receipt written that way can
+  // never be verified by anyone, including its owner. Sort by construction and
+  // let stringify write the whole document.
+  const ordered = {};
+  for (const key of Object.keys(document).sort()) ordered[key] = document[key];
+  await fs.writeFile(temporary, JSON.stringify(ordered, null, 2) + "\n", { mode: 0o600 });
   await fs.rename(temporary, target);
   return target;
 }
@@ -1004,7 +1034,10 @@ export async function main(argv) {
             (result.valid ? "verified " : "FAILED   ") + target,
             "  proof   " + receipt.proof_id,
             "  chain   " + (result.transaction_signature ?? "-"),
-          ].concat(failed.length ? ["  failed  " + failed.join(", ")] : [])
+          ].concat(flags.has("--offline") ? [
+            "  witness consistent offline; whether the checkpoint was published is shown",
+            "          at the URLs the receipt names, not here (checkpoints are unsigned)",
+          ] : []).concat(failed.length ? ["  failed  " + failed.join(", ")] : [])
         );
       } catch (error) {
         fail(error instanceof VerifyumError ? EXIT_UNAVAILABLE : EXIT_USAGE, error.message);

@@ -267,6 +267,69 @@ function verifyum_compute_commitment( array $manifest ): string
     return 'sha256:'. hash( 'sha256', $prefix . verifyum_jcs_encode( $manifest ) );
 }
 
+/**
+ * The did:web document, derived from the key registry at request time. A
+ * hand-maintained copy of the mainnet key stood at the well-known path once,
+ * and nothing compared the copy to the registry: a rotation would have left
+ * did:web:verifyum.com resolving to a retired key with every check green.
+ * Built this way the document cannot name a key the registry does not call
+ * active on the running network, and there is no second copy to drift. It
+ * claims assertionMethod and nothing else: there is no authentication here.
+ */
+function verifyum_did_document( array $registry, string $network = 'mainnet-beta' ): ?array
+{
+    $methods = [];
+    $assertion = [];
+    foreach ( (array)( $registry['keys'] ?? [] ) as $key ){
+        if (
+            !is_array( $key )
+            or ( $key['status'] ?? null ) !== 'active'
+            or ( $key['network'] ?? null ) !== $network
+            or ( $key['algorithm'] ?? null ) !== 'ed25519'
+            or !is_string( $key['key_id'] ?? null )
+            or preg_match( '/^[a-z0-9-]{1,64}$/', $key['key_id'] ) !== 1
+            or !is_string( $key['public_key'] ?? null )
+        ){
+            continue;
+        }
+        $encoded = $key['public_key'];
+        $padded = strtr( $encoded, '-_', '+/' ) . str_repeat( '=', ( 4 - strlen( $encoded ) % 4 ) % 4 );
+        $raw = base64_decode( $padded, true );
+        if ( !is_string( $raw ) or strlen( $raw ) !== 32 ){
+            continue;
+        }
+        $id = 'did:web:verifyum.com#'. $key['key_id'];
+        $methods[] = [
+            'id'=>$id,
+            'type'=>'JsonWebKey',
+            'controller'=>'did:web:verifyum.com',
+            'publicKeyJwk'=>[
+                'kty'=>'OKP',
+                'crv'=>'Ed25519',
+                'x'=>$encoded,
+                'kid'=>$key['key_id'],
+                'alg'=>'EdDSA',
+                'use'=>'sig',
+            ],
+        ];
+        $assertion[] = $id;
+    }
+    if ( $methods === [] ){
+        return null;
+    }
+    return [
+        '@context'=>[ 'https://www.w3.org/ns/did/v1', 'https://www.w3.org/ns/cid/v1' ],
+        'id'=>'did:web:verifyum.com',
+        'verificationMethod'=>$methods,
+        'assertionMethod'=>$assertion,
+        'service'=>[ [
+            'id'=>'did:web:verifyum.com#service-key-registry',
+            'type'=>'VerifyumServiceKeyRegistry',
+            'serviceEndpoint'=>'https://verifyum.com/.well-known/verifyum-service-keys.json',
+        ] ],
+    ];
+}
+
 function verifyum_read_service_key_registry( string $proof_store ): ?array
 {
     $path = rtrim( $proof_store, '/\\' ) .'/.verifyum-service-keys.json';

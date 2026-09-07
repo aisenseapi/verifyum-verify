@@ -1471,9 +1471,10 @@ const VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES = 20000;
 /**
  * Lists the batch ids present in one kind of a witness store, newest first.
  * Batch ids begin with a UTC timestamp, so a reverse sort is chronological
- * and no file has to be opened to order them.
+ * and no file has to be opened to order them. The bound is injectable so a
+ * check can cross it with a handful of files; production passes nothing.
  */
-function verifyum_witness_list_batches( string $store, string $kind ): array
+function verifyum_witness_list_batches( string $store, string $kind, ?int $max_batches = null ): array
 {
     if (
         !in_array( $kind, [ 'hourly', 'daily' ], true )
@@ -1498,7 +1499,7 @@ function verifyum_witness_list_batches( string $store, string $kind ): array
         $batches[] = $match[1];
     }
     rsort( $batches, SORT_STRING );
-    return array_slice( $batches, 0, VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES );
+    return array_slice( $batches, 0, max( 1, $max_batches ?? VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES ) );
 }
 
 /**
@@ -1667,7 +1668,10 @@ function verifyum_witness_public_statistics(
     }
 
     return [
-        'schema'=>'https://verifyum.com/schema/witness-statistics-v1.json',
+        // Operator-only: served behind the statistics curtain, never cited
+        // by a public document, so it names no schema. It used to name one
+        // that was never written, which a scan for cited schemas rightly
+        // reported as a broken promise.
         'protocol'=>'verifyum',
         'version'=>1,
         'network'=>$network,
@@ -2317,6 +2321,133 @@ function verifyum_activity_series(
  * Reads the public witness receipts store to find the latest confirmed
  * state and timestamp for each channel, comparing the age against channel cadence.
  */
+const VERIFYUM_WITNESS_CHECKPOINT_INDEX_SCHEMA =
+    'https://verifyum.com/schema/witness-checkpoint-index-v1.json';
+const VERIFYUM_WITNESS_INDEX_DEFAULT_LIMIT = 50;
+const VERIFYUM_WITNESS_INDEX_MAX_LIMIT = 200;
+
+/**
+ * One page of published checkpoints, ordered by period start, newest first.
+ *
+ * A cursor rather than an offset, so an arrival never repeats a row the reader
+ * has already been given. That much holds unconditionally.
+ *
+ * What does NOT hold is that an arrival always lands above the reader. Rows are
+ * ordered by the period a checkpoint covers, not by when it was published, and
+ * a daily checkpoint is published about twenty-four hours after its period
+ * starts. It therefore appears well down the list at the moment it is written,
+ * and a reader who has already paged past that point will not see it and will
+ * be told there is no next page. This was claimed to be impossible, which was
+ * true of hourly checkpoints and false of exactly the daily ones that bridge to
+ * the independent witnesses.
+ *
+ * Ordering by publication time would mean reading every document, since the
+ * time is not in the identifier. So the page reports the total instead: a
+ * reader who wants a complete snapshot compares the total across the walk and
+ * starts again if it moved.
+ *
+ * $before is exclusive and takes a batch identifier, so a reader follows the
+ * "next" link without constructing anything itself.
+ */
+function verifyum_witness_public_checkpoint_index(
+    string $store,
+    ?string $kind = null,
+    int $limit = VERIFYUM_WITNESS_INDEX_DEFAULT_LIMIT,
+    ?string $before = null,
+    ?int $now = null,
+    ?int $max_batches = null
+): ?array {
+    if ( $kind !== null and !in_array( $kind, [ 'hourly', 'daily' ], true ) ){
+        return null;
+    }
+    if ( $before !== null and preg_match( '/\A[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}\z/', $before ) !== 1 ){
+        return null;
+    }
+    $limit = max( 1, min( VERIFYUM_WITNESS_INDEX_MAX_LIMIT, $limit ) );
+    $now = $now ?? time();
+    $kinds = $kind === null ? [ 'hourly', 'daily' ] : [ $kind ];
+
+    $rows = [];
+    // verifyum_witness_list_batches stops at VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES
+    // and drops the oldest silently. Hitting that boundary exactly is the only
+    // signal available that older checkpoints may exist beyond it, so it is
+    // carried into the document rather than swallowed: a reader who reaches
+    // the last page must be able to tell "this is the whole record" from
+    // "this is as far as the index goes".
+    $reaches_beginning = true;
+    $listing_bound = max( 1, $max_batches ?? VERIFYUM_WITNESS_STATISTICS_MAX_BATCHES );
+    foreach ( $kinds as $listed_kind ){
+        $listed = verifyum_witness_list_batches( $store, $listed_kind, $listing_bound );
+        if ( count( $listed ) >= $listing_bound ){
+            $reaches_beginning = false;
+        }
+        foreach ( $listed as $batch_id ){
+            $rows[] = [ 'kind'=>$listed_kind, 'batch_id'=>$batch_id ];
+        }
+    }
+    // Newest first across both kinds. The identifier begins with the period
+    // start, so a string sort is a time sort.
+    usort( $rows, static function ( array $left, array $right ): int {
+        $order = strcmp( $right['batch_id'], $left['batch_id'] );
+        return $order !== 0 ? $order : strcmp( $left['kind'], $right['kind'] );
+    } );
+
+    // Counted before the cursor is applied, so every page reports the same
+    // total for an unchanged record. A reader that sees it move mid-walk knows
+    // something was published, which is the only way to notice a daily
+    // checkpoint that arrived below the cursor.
+    $rows_before_cursor = $rows;
+    if ( $before !== null ){
+        $rows = array_values( array_filter( $rows, static function ( array $row ) use ( $before ): bool {
+            return strcmp( $row['batch_id'], $before ) < 0;
+        } ) );
+    }
+
+    $page = array_slice( $rows, 0, $limit );
+    $has_more = count( $rows ) > count( $page );
+
+    $entries = [];
+    foreach ( $page as $row ){
+        $period_start = null;
+        if ( preg_match( '/\A([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z-/', $row['batch_id'], $stamp ) === 1 ){
+            $period_start = $stamp[1] .'-'. $stamp[2] .'-'. $stamp[3]
+                .'T'. $stamp[4] .':'. $stamp[5] .':'. $stamp[6] .'Z';
+        }
+        $entries[] = [
+            'kind' => $row['kind'],
+            'batch_id' => $row['batch_id'],
+            'period_start' => $period_start,
+            'checkpoint_url' => 'https://verifyum.com/witness/checkpoints/'
+                . $row['kind'] .'/'. $row['batch_id'] .'.json',
+            'receipts_url' => 'https://verifyum.com/witness/receipts/'
+                . $row['kind'] .'/'. $row['batch_id'] .'.json',
+        ];
+    }
+
+    $next = null;
+    if ( $has_more and $entries !== [] ){
+        $oldest = $entries[ count( $entries ) - 1 ]['batch_id'];
+        $next = 'https://verifyum.com/witness/checkpoints'
+            . ( $kind === null ? '' : '/'. $kind )
+            .'?before='. rawurlencode( $oldest )
+            .'&limit='. $limit;
+    }
+
+    return [
+        'schema' => VERIFYUM_WITNESS_CHECKPOINT_INDEX_SCHEMA,
+        'protocol' => 'verifyum',
+        'version' => 1,
+        'generated_at' => verifyum_service_iso_time( $now ),
+        'kind' => $kind,
+        'limit' => $limit,
+        'count' => count( $entries ),
+        'total' => count( $rows_before_cursor ),
+        'reaches_beginning' => $reaches_beginning,
+        'checkpoints' => $entries,
+        'next' => $next,
+    ];
+}
+
 function verifyum_witness_public_channel_status(
     string $receipt_store,
     ?int $now = null
@@ -2386,6 +2517,7 @@ function verifyum_witness_public_channel_status(
             'health' => 'unknown',
             'caught_up' => false,
             'latest_batch_id' => null,
+            'confirmed_batch_id' => null,
             'latest_observed_at' => null,
             'latest_confirmed_at' => null,
             'age_seconds' => null,
@@ -2435,6 +2567,12 @@ function verifyum_witness_public_channel_status(
                 }
                 if ( ( $entry['state'] ?? '' ) === 'confirmed' and $statuses[$ch]['latest_confirmed_at'] === null ){
                     $statuses[$ch]['latest_confirmed_at'] = isset( $entry['observed_at'] ) ? (string)$entry['observed_at'] : null;
+                    // The newest batch a channel appears in and the newest one
+                    // it confirmed are not always the same, and reporting a
+                    // confirmation time without saying which checkpoint it
+                    // belongs to let the two drift apart in the document with
+                    // nothing to tie them together.
+                    $statuses[$ch]['confirmed_batch_id'] = $batch_id;
                 }
             }
         }
@@ -2451,13 +2589,30 @@ function verifyum_witness_public_channel_status(
         // alerting already asks the right question, per published checkpoint,
         // so ask it here too: a channel that has confirmed the newest
         // checkpoint of its kind is current, however long ago that was.
+        // Appearing in the newest checkpoint is not the same as having
+        // witnessed it. This once asked only whether the channel was present,
+        // so a channel whose entry said failed, pending or unavailable was
+        // still reported caught up, and health then read healthy for as long
+        // as any older confirmation survived the scan window. The published
+        // schema says caught_up means the channel has CONFIRMED the newest
+        // checkpoint, so require exactly that.
         $info['caught_up'] = $newest_batch[ $meta['kind'] ] !== null
-            && $info['latest_batch_id'] === $newest_batch[ $meta['kind'] ];
+            && $info['latest_batch_id'] === $newest_batch[ $meta['kind'] ]
+            && $info['state'] === 'confirmed';
         if ( is_int( $confirmed_time ) ){
             $age = max( 0, $now - $confirmed_time );
             $info['age_seconds'] = $age;
             $allowed_lag = $meta['cadence_seconds'] + $meta['max_allowed_lag'];
-            if ( $info['caught_up'] or $age <= $allowed_lag ){
+            // A channel that has failed the newest checkpoint has not fallen
+            // behind, it has broken, and the two deserve different words. This
+            // branch used to be reached only when the channel had never
+            // confirmed anything, so a channel that failed after a successful
+            // history kept reading healthy for as long as its last success sat
+            // inside the tolerance: for OpenTimestamps that is forty-nine
+            // hours of a dead channel published as a live one.
+            if ( $info['state'] === 'failed' ){
+                $info['health'] = 'failed';
+            } elseif ( $info['caught_up'] or $age <= $allowed_lag ){
                 $info['health'] = 'healthy';
             } else {
                 $info['health'] = 'lagging';

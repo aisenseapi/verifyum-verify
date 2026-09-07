@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://verifyum.com/schema/witness-checkpoint-index-v1.json",
+  "title": "Verifyum Witness Layer checkpoint index version 1",
+  "description": "One page of published checkpoints, ordered by the period each covers, newest first. Paging uses an exclusive cursor, so a page never repeats a checkpoint already given. It does NOT follow that a walk sees everything: rows are ordered by period, not by publication, and a daily checkpoint is published about twenty-four hours after its period starts, so it appears part-way down the list rather than at the head and a reader who has passed that point will be told `next` is null without having seen it. A reader who needs a complete snapshot compares `total` across the walk and starts again if it moved. Nothing here names a proof; a checkpoint is an aggregate over many.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "protocol",
+    "version",
+    "generated_at",
+    "kind",
+    "limit",
+    "count",
+    "total",
+    "reaches_beginning",
+    "checkpoints",
+    "next"
+  ],
+  "properties": {
+    "schema": {
+      "const": "https://verifyum.com/schema/witness-checkpoint-index-v1.json"
+    },
+    "protocol": { "const": "verifyum" },
+    "version": { "const": 1 },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kind": {
+      "description": "Null when the page mixes both kinds, otherwise the single kind it was filtered to.",
+      "oneOf": [
+        { "enum": ["hourly", "daily"] },
+        { "type": "null" }
+      ]
+    },
+    "limit": {
+      "description": "The page size actually applied, after clamping.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "count": {
+      "description": "Checkpoints on this page.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "total": {
+      "description": "Every checkpoint matching this filter, counted before the cursor is applied, so it is the same on every page of an unchanged record. If it changes during a walk something was published, possibly below the cursor, and a reader that needs completeness should walk again.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "reaches_beginning": {
+      "description": "True when the index can page back to the first checkpoint ever published. False when the listing hit its internal bound, in which case a null `next` means the index has run out rather than the record having ended, and older checkpoints exist that this index cannot reach. Do not read a null `next` as completeness without checking this.",
+      "type": "boolean"
+    },
+    "checkpoints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "batch_id", "period_start", "checkpoint_url", "receipts_url"],
+        "properties": {
+          "kind": { "enum": ["hourly", "daily"] },
+          "batch_id": {
+            "type": "string",
+            "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{64}$"
+          },
+          "period_start": {
+            "oneOf": [
+              { "type": "string", "format": "date-time" },
+              { "type": "null" }
+            ]
+          },
+          "checkpoint_url": {
+            "description": "The checkpoint document itself. Its checkpoint_hash is not the SHA-256 of the bytes served: it is SHA-256 over the UTF-8 prefix verifyum:witness:checkpoint:v1 followed by one newline, then the RFC 8785 canonical JSON of the document with the checkpoint_hash member removed. witness-checkpoint-v1 states the rule.",
+            "type": "string",
+            "format": "uri"
+          },
+          "receipts_url": {
+            "description": "What each witness channel attested for this checkpoint.",
+            "type": "string",
+            "format": "uri"
+          }
+        }
+      }
+    },
+    "next": {
+      "description": "The next page, or null when this is the last. The cursor is exclusive, so following it never repeats a checkpoint.",
+      "oneOf": [
+        { "type": "string", "format": "uri" },
+        { "type": "null" }
+      ]
+    }
+  }
+}
