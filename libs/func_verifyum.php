@@ -1,6 +1,11 @@
 <?php
 declare( strict_types = 1 );
 
+// Upper bound on a request body the router will hand to json_decode. It
+// sits above the largest route limit (8192, MCP) so that an oversized
+// request still gets that route's own 413 rather than a silent empty
+// payload. tools/check-code.php asserts it stays above every route limit.
+const VERIFYUM_MAX_JSON_BODY_BYTES = 16384;
 const VERIFYUM_PROOF_ID_PATTERN = '/\A[0-7][0-9a-hjkmnp-tv-z]{25}\z/';
 const VERIFYUM_COMMITMENT_PATTERN = '/\Asha256:[0-9a-f]{64}\z/';
 const VERIFYUM_MEMO_PROGRAM_ID = 'MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr';
@@ -47,8 +52,12 @@ function verifyum_load_config( string $domain_dir ): array
     }
 
     $config['anchor_enabled'] = (bool)$config['anchor_enabled'];
+    // `and` binds looser than `=`, so writing it here assigned only
+    // anchor_enabled and threw the operator's setting away: the narrower
+    // gate always equalled the broader one and the emergency stop for
+    // credential-free anchoring did nothing at all.
     $config['anonymous_anchor_enabled'] = $config['anchor_enabled']
-        and (bool)$config['anonymous_anchor_enabled'];
+        && (bool)$config['anonymous_anchor_enabled'];
     return $config;
 }
 
@@ -328,6 +337,36 @@ function verifyum_did_document( array $registry, string $network = 'mainnet-beta
             'serviceEndpoint'=>'https://verifyum.com/.well-known/verifyum-service-keys.json',
         ] ],
     ];
+}
+
+/**
+ * Every absolute verifyum.com or api.verifyum.com URL the discovery
+ * documents advertise, keyed by URL with the documents that name it.
+ * Shared by the offline router harness and the live readiness check, so
+ * the collector runs locally before it runs on production: the live check
+ * once died on a by-reference cast inside a loop nothing else executed.
+ */
+function verifyum_discovery_urls( string $well_known_dir ): array
+{
+    $advertised = [];
+    foreach ( glob( rtrim( $well_known_dir, '/'. DIRECTORY_SEPARATOR ) .'/*.json' ) ?: [] as $file ){
+        $document = json_decode( (string)file_get_contents( $file ), true );
+        if ( !is_array( $document ) ){
+            continue;
+        }
+        $walk = function ( mixed $node ) use ( &$walk, &$advertised, $file ): void {
+            if ( is_array( $node ) ){
+                foreach ( $node as $value ){
+                    $walk( $value );
+                }
+            } elseif ( is_string( $node ) and preg_match( '#^https://(api[.])?verifyum[.]com/#', $node ) === 1 ){
+                $advertised[ $node ][ basename( $file ) ] = true;
+            }
+        };
+        $walk( $document );
+    }
+    ksort( $advertised );
+    return $advertised;
 }
 
 function verifyum_read_service_key_registry( string $proof_store ): ?array

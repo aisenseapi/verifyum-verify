@@ -1,5 +1,26 @@
 const CROCKFORD_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
 const COMMITMENT_PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
+
+/**
+ * The recipe for the commitment, carried inside every draft so the file can
+ * explain itself years from now with no network and no Verifyum software.
+ * It sits beside the manifest, never inside it: the manifest is what gets
+ * hashed, so one more field in there would change every commitment.
+ * tools/check-code.php lifts the prefix back out of this text and recomputes
+ * the protocol vector from it, so the prose cannot drift from the code.
+ */
+export const DERIVATION = {
+  summary: "commitment = 'sha256:' + hex(SHA-256('verifyum:commitment:v2' + LF + JCS(manifest)))",
+  steps: [
+    "file.hash.value is SHA-256 of the original bytes in lowercase hex. file.size is the length in bytes, written as a decimal string.",
+    "nonce is 32 random bytes in base64url without padding. It is the secret half: the commitment discloses nothing without it, and proves the tie to the file with it.",
+    "Canonicalize the manifest with RFC 8785 (JCS): object keys sorted by UTF-16 code unit, no insignificant whitespace, UTF-8 output.",
+    "Prepend 'verifyum:commitment:v2' and one newline (0x0A) to those canonical bytes, then take SHA-256 of the whole.",
+    "Write the result as 'sha256:' followed by that digest in lowercase hex.",
+  ],
+  privacy: "Only the commitment was sent to Verifyum. The file, its hash, its name and the nonce stayed on this machine.",
+  independence: "Any SHA-256 and any RFC 8785 implementation reproduces this commitment from this file alone, with no network and no Verifyum software.",
+};
 const PROOF_ID_PATTERN = /^[0-7][0-9a-hjkmnp-tv-z]{25}$/;
 const COMMITMENT_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const HEX_256_PATTERN = /^[0-9a-f]{64}$/;

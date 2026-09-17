@@ -39,6 +39,10 @@
         "format": { "const": "verifyum-private-draft" },
         "version": { "const": 2 },
         "created_at": { "type": "string", "format": "date-time" },
+        "derivation": {
+          "description": "How the commitment was derived from the manifest, in plain words, so this file can be checked years from now without fetching anything. Informational: it is never hashed and never trusted over the algorithm itself.",
+          "type": "object"
+        },
         "anchor_result": { "type": "object" }
       }
     },

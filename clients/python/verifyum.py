@@ -64,7 +64,7 @@ __all__ = [
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
-USER_AGENT = "verifyum-python/1.3.1"
+USER_AGENT = "verifyum-python/1.3.2"
 WITNESS_OFFLINE_SCOPE = (
     "Offline, the witness checks show that the receipt's checkpoints, Merkle "
     "paths and signed metadata agree with each other, that the service "
@@ -475,6 +475,26 @@ def _request(method: str, path: str, payload: dict | None = None) -> dict:
 # --- Protocol v2 client ------------------------------------------------------
 
 
+# The recipe for the commitment, carried inside every draft so the file can
+# explain itself years from now with no network and no Verifyum software.
+# It sits beside the manifest, never inside it: the manifest is what gets
+# hashed, so one more field in there would change every commitment.
+# tools/check-code.php lifts the prefix back out of this text and recomputes
+# the protocol vector from it, so the prose cannot drift from the code.
+DERIVATION = {
+    "summary": "commitment = 'sha256:' + hex(SHA-256('verifyum:commitment:v2' + LF + JCS(manifest)))",
+    "steps": [
+        "file.hash.value is SHA-256 of the original bytes in lowercase hex. file.size is the length in bytes, written as a decimal string.",
+        "nonce is 32 random bytes in base64url without padding. It is the secret half: the commitment discloses nothing without it, and proves the tie to the file with it.",
+        "Canonicalize the manifest with RFC 8785 (JCS): object keys sorted by UTF-16 code unit, no insignificant whitespace, UTF-8 output.",
+        "Prepend 'verifyum:commitment:v2' and one newline (0x0A) to those canonical bytes, then take SHA-256 of the whole.",
+        "Write the result as 'sha256:' followed by that digest in lowercase hex.",
+    ],
+    "privacy": "Only the commitment was sent to Verifyum. The file, its hash, its name and the nonce stayed on this machine.",
+    "independence": "Any SHA-256 and any RFC 8785 implementation reproduces this commitment from this file alone, with no network and no Verifyum software.",
+}
+
+
 def commitment_for(data: bytes) -> tuple[str, dict]:
     """Returns (commitment, private_draft). The draft must be kept locally."""
     nonce = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip("=")
@@ -494,6 +514,7 @@ def commitment_for(data: bytes) -> tuple[str, dict]:
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "manifest": manifest,
         "commitment": commitment,
+        "derivation": DERIVATION,
     }
     return commitment, draft
 
