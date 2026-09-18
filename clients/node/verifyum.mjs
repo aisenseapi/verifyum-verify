@@ -22,7 +22,7 @@ import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypt
 
 const API_BASE = globalThis.process?.env?.VERIFYUM_API_BASE ?? "https://api.verifyum.com";
 const PROOF_DOMAIN = globalThis.process?.env?.VERIFYUM_PROOF_DOMAIN ?? "verifyum.com";
-const USER_AGENT = "verifyum-js/1.3.2";
+const USER_AGENT = "verifyum-js/1.4.0";
 const PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
 
 /**
@@ -228,9 +228,18 @@ const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const NETWORKS = new Set(["devnet", "mainnet-beta"]);
 const MAX_PATH_LENGTH = 64;
 
+// What verifyWitness checks, and what it does not. It once said a proof was
+// in a checkpoint "that independent third parties observed" and reported
+// `witnessed: true` unconditionally; a locally built daily checkpoint that was
+// never published passed as witnessed. Only the channel receipts show external
+// witnessing, and nothing here reads them.
 export const WITNESS_BOUNDARY_STATEMENT =
-  "A witnessed proof shows that its public metadata was included in a checkpoint that independent " +
-  "third parties observed. It does not prove authorship, ownership, or that the file contents are true.";
+  "Shows that the signed proof metadata is included, by Merkle path, in the " +
+  "checkpoint these documents describe, and in the daily checkpoint when a " +
+  "chain is given. It does not show that any external witness observed a " +
+  "checkpoint: checkpoints are unsigned, and the channel receipts at the " +
+  "receipts URLs are what show that. Not authorship, ownership, or that the " +
+  "contents are true.";
 
 export const WITNESS_OFFLINE_SCOPE =
   "Offline, the witness checks show that the receipt's checkpoints, Merkle paths and signed metadata agree " +
@@ -663,7 +672,7 @@ export function verifyWitnessDocuments({ proofId, metadata, bundle, chain = null
   const { problems, ...results } = checks;
   return {
     proof_id: proofId,
-    witnessed: true,
+    checkpoint_available: true,
     valid: Object.values(results).every(Boolean),
     checks: results,
     problems,
@@ -672,7 +681,10 @@ export function verifyWitnessDocuments({ proofId, metadata, bundle, chain = null
     checkpoint_url: bundle?.checkpoint_url ?? null,
     leaf_index: bundle?.membership?.leaf_index ?? null,
     leaf_count: bundle?.membership?.leaf_count ?? null,
-    daily_witnessed: chain !== null,
+    // Presence, not a verdict: whether a daily chain was given at all.
+    daily_chain_present: chain !== null,
+    // Never checked here. null means "not verified", which is the truth.
+    external_witness_verified: null,
     daily_checkpoint_hash: chain?.daily_checkpoint?.checkpoint_hash ?? null,
     hourly_receipts_url: chain?.hourly_receipts_url ?? null,
     daily_receipts_url: chain?.daily_receipts_url ?? null,
@@ -689,7 +701,7 @@ async function fetchBytes(url) {
 /**
  * Fetches a proof's public metadata, witness bundle, the published checkpoint
  * file and the key registry, then verifies them offline. A proof whose hourly
- * checkpoint has not been published yet returns `witnessed: false`; that is
+ * checkpoint has not been published yet returns `checkpoint_available: false`; that is
  * not a failure, the proof is simply younger than the next checkpoint.
  */
 export async function verifyWitness(proofId, { registryUrl = REGISTRY_URL } = {}) {
@@ -704,7 +716,7 @@ export async function verifyWitness(proofId, { registryUrl = REGISTRY_URL } = {}
     bundle = parseDocument(await fetchBytes(`${base}/.well-known/verifyum-witnesses.json`));
   } catch (error) {
     if (error instanceof VerifyumError && error.status === 404) {
-      return { proof_id: proofId, witnessed: false, valid: false, checks: {}, problems: [], boundary: WITNESS_BOUNDARY_STATEMENT };
+      return { proof_id: proofId, checkpoint_available: false, valid: false, checks: {}, problems: [], boundary: WITNESS_BOUNDARY_STATEMENT };
     }
     throw error;
   }
@@ -1103,7 +1115,15 @@ export async function main(argv) {
       emit(
         { proof_id: proofId, ...result },
         asJson,
-        [ (result.valid ? "witnessed " : "FAILED    ") + proofId ]
+        [
+          (result.valid ? "chain ok  " : "FAILED    ") + proofId,
+          "  external witnesses not checked here: " + (
+            result.daily_receipts_url
+            ?? result.hourly_receipts_url
+            ?? (String(result.checkpoint_url ?? "").replace("/witness/checkpoints/", "/witness/receipts/")
+              || "the channel receipts")
+          ),
+        ]
       );
     } catch (error) {
       fail(error instanceof VerifyumError ? EXIT_UNAVAILABLE : EXIT_USAGE, error.message);

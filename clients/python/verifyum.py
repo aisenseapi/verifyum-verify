@@ -64,7 +64,21 @@ __all__ = [
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
-USER_AGENT = "verifyum-python/1.3.2"
+USER_AGENT = "verifyum-python/1.4.0"
+# What verify_witness checks, and what it does not. It once reported
+# `daily_witnessed` whenever a daily chain was present and said the checkpoint
+# was the one the external witnesses hold; a locally built daily checkpoint
+# that was never published passed as witnessed. Checkpoints are unsigned, so
+# only the channel receipts show external witnessing, and nothing here reads
+# them.
+WITNESS_CHAIN_BOUNDARY = (
+    "Shows that the signed proof metadata is included, by Merkle path, in the "
+    "checkpoint these documents describe, and in the daily checkpoint when a "
+    "chain is given. It does not show that any external witness observed a "
+    "checkpoint: checkpoints are unsigned, and the channel receipts at the "
+    "receipts URLs are what show that. Not authorship, ownership, or that the "
+    "contents are true."
+)
 WITNESS_OFFLINE_SCOPE = (
     "Offline, the witness checks show that the receipt's checkpoints, Merkle "
     "paths and signed metadata agree with each other, that the service "
@@ -895,13 +909,15 @@ def verify_witness_documents(metadata, bundle, registry, chain=None) -> dict:
         "checkpoint_url": bundle.get("checkpoint_url"),
         "network": checkpoint.get("network"),
         "period_end": checkpoint.get("period_end"),
-        "daily_witnessed": daily_result is not None,
+        # Presence, not a verdict: whether a daily chain was given at all.
+        "daily_chain_present": daily_result is not None,
+        # Never checked here. None means "not verified", which is the truth;
+        # the receipts at daily_receipts_url are where it can be checked.
+        "external_witness_verified": None,
         "daily_checkpoint_hash": (daily_result or {}).get("daily_checkpoint_hash"),
         "hourly_receipts_url": (daily_result or {}).get("hourly_receipts_url"),
         "daily_receipts_url": (daily_result or {}).get("daily_receipts_url"),
-        "boundary": "Shows that the proof metadata was included in a checkpoint no later than "
-        "period_end and that the checkpoint is the one the external witnesses hold. "
-        "Not authorship, ownership, or that the contents are true.",
+        "boundary": WITNESS_CHAIN_BOUNDARY,
     }
 
 
@@ -1309,8 +1325,14 @@ def _cmd_witness(args) -> int:
             {"proof_id": proof_id, **result},
             args.json,
             [
-                ("witnessed " if ok else "FAILED    ") + proof_id,
+                ("chain ok  " if ok else "FAILED    ") + proof_id,
                 "  checkpoint " + str(result.get("checkpoint_hash") or result.get("checkpoint", {}).get("checkpoint_hash")),
+                "  external witnesses not checked here: " + (
+                    result.get("daily_receipts_url")
+                    or result.get("hourly_receipts_url")
+                    or str(result.get("checkpoint_url") or "").replace("/witness/checkpoints/", "/witness/receipts/")
+                    or "the channel receipts"
+                ),
             ] + (["  not run  " + ", ".join(unchecked)] if unchecked else []),
         )
     return worst
