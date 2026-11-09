@@ -14,6 +14,13 @@ each verified against the same live records and against each other. It does
 not hold the operational side: the signer, the queue, the publisher adapters
 and the web tier stay private.
 
+**Receipts from the Node client 1.2.0 to 1.4.0.** `verifyum stamp` in those
+npm versions, and the GitHub action before 9 November 2026, wrote receipts
+with `private_draft: null`. Without the nonce such a receipt cannot tie its
+file to the proof, for anyone, and Verifyum never had the nonce. The proofs
+themselves stand. Stamp the files again with 1.4.1 or later. `verifyum verify`
+now says when a receipt has this problem.
+
 ## The spec
 
 `PROTOCOL.md` states every hashing rule byte for byte: the digest form, the
