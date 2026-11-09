@@ -22,6 +22,7 @@ function verifyum_load_config( string $domain_dir ): array
         'public_rpc_url' => 'https://api.devnet.solana.com',
         'anchor_address' => null,
         'anchor_credentials_path' => '/etc/verifyum/web/anchor-clients.json',
+        'openai_apps_challenge_path' => '/etc/verifyum/web/openai-apps-challenge',
         'witness_checkpoint_store' => '/var/lib/verifyum/witness-outbox',
         'witness_membership_store' => '/var/lib/verifyum/witness-memberships',
         'witness_receipt_store' => '/var/lib/verifyum/witness-public-receipts',
@@ -186,6 +187,39 @@ function verifyum_classify_host( string $host ): array
         return [ 'kind'=>'proof', 'proof_id'=>$match[1], 'log_host'=>'proof.verifyum.com' ];
     }
     return [ 'kind'=>'invalid', 'proof_id'=>null, 'log_host'=>'invalid.verifyum.com' ];
+}
+
+/**
+ * A domain verification token as a directory wants it served: one line of
+ * printable ASCII without spaces, returned without the line ending an editor
+ * leaves. Anything else is no token, so the route says so rather than serving
+ * something the directory would reject.
+ */
+function verifyum_parse_domain_challenge( string $text ): ?string
+{
+    $token = trim( $text );
+    return preg_match( '/\A[\x21-\x7e]{8,1024}\z/', $token ) === 1 ? $token : null;
+}
+
+/**
+ * Reads a domain verification token from a file the operator writes. The file
+ * must belong to root and be writable by nobody else, because whoever sets the
+ * token claims the domain for a listing. A missing or unsafe file is no token.
+ */
+function verifyum_read_domain_challenge( string $path ): ?string
+{
+    clearstatcache( true, $path );
+    if ( $path === '' or is_link( $path ) or !is_file( $path ) or !is_readable( $path ) ){
+        return null;
+    }
+    if ( DIRECTORY_SEPARATOR === '/' ){
+        $mode = fileperms( $path );
+        if ( fileowner( $path ) !== 0 or $mode === false or ( $mode & 0022 ) !== 0 ){
+            return null;
+        }
+    }
+    $text = file_get_contents( $path, false, null, 0, 1100 );
+    return is_string( $text ) ? verifyum_parse_domain_challenge( $text ) : null;
 }
 
 function verifyum_generate_proof_id(): string

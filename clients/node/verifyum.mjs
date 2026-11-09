@@ -22,7 +22,7 @@ import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypt
 
 const API_BASE = globalThis.process?.env?.VERIFYUM_API_BASE ?? "https://api.verifyum.com";
 const PROOF_DOMAIN = globalThis.process?.env?.VERIFYUM_PROOF_DOMAIN ?? "verifyum.com";
-const USER_AGENT = "verifyum-js/1.4.0";
+const USER_AGENT = "verifyum-js/1.4.1";
 const PREFIX = new TextEncoder().encode("verifyum:commitment:v2\n");
 
 /**
@@ -168,12 +168,29 @@ export async function anchorRecord(record, options) {
   return anchorBytes(new TextEncoder().encode(canonicalize(record)), options);
 }
 
+/** True when a private draft can still tie data to its proof: it carries the nonce. */
+function draftHasNonce(draft) {
+  const nonce = draft?.manifest?.nonce;
+  return typeof nonce === "string" && nonce !== "";
+}
+
+// What a receipt without its nonce means, said the same way by every command
+// that meets one. The proof may stand on the ledger, but without the nonce
+// nothing, including Verifyum, can tie the file to it.
+const RECEIPT_WITHOUT_NONCE =
+  "this receipt holds no private draft with a nonce, so nothing can tie the file to its proof. " +
+  "The Node `verifyum stamp` from 1.2.0 to 1.4.0, which the GitHub Action runs, wrote receipts " +
+  "like this; stamp the file again with 1.4.1 or later";
+
 /**
  * Checks that `data` matches the draft and that the proof is finalized. For a
  * fully independent result, also fetch the Solana transaction named in the
  * metadata from any RPC endpoint and compare its memo.
  */
 export async function verify(proofId, data, draft) {
+  if (!draftHasNonce(draft)) {
+    throw new VerifyumError("the private draft is missing or carries no nonce, so nothing can tie the data to the proof");
+  }
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
   const manifest = draft.manifest;
   const canonical = new TextEncoder().encode(canonicalize(manifest));
@@ -797,6 +814,10 @@ export function receiptMemo(metadata) {
  * see verifyIndependent.
  */
 export async function verifyOffline(data, receipt) {
+  // First, because no upgrade can supply what this lacks.
+  if (!draftHasNonce(receipt?.private_draft)) {
+    throw new VerifyumError(RECEIPT_WITHOUT_NONCE);
+  }
   if (!receiptIsComplete(receipt)) {
     throw new VerifyumError("receipt does not carry its evidence yet; run `verifyum upgrade` while online");
   }
@@ -929,6 +950,9 @@ export function receiptPath(path) {
   return path + RECEIPT_SUFFIX;
 }
 
+// Raised instead of writing a receipt that could never verify.
+class ReceiptRefused extends Error {}
+
 async function writeReceipt(fs, path, proof, evidence) {
   const target = receiptPath(path);
   const document = {
@@ -939,9 +963,21 @@ async function writeReceipt(fs, path, proof, evidence) {
     commitment: proof.commitment ?? null,
     status: proof.status ?? null,
     proof_url: proof.proof_url ?? null,
-    private_draft: proof.private_draft ?? null,
+    private_draft: proof.privateDraft ?? null,
     ...(evidence ?? {}),
   };
+  // anchorBytes returns the draft as privateDraft. From 1.2.0 to 1.4.0 the
+  // line above read proof.private_draft, a name nothing returns, so every
+  // receipt `stamp` wrote carried null where the nonce belongs. Each looked
+  // complete, and nobody, the owner included, can ever verify one. The only
+  // check on this writer read its source text; tools/check-stamp.mjs runs it.
+  // A receipt without the nonce is worse than none, so none is written.
+  if (!draftHasNonce(document.private_draft)) {
+    throw new ReceiptRefused(
+      "no receipt written for " + path + ": the draft that holds the nonce is missing, so proof " +
+      (document.proof_id ?? "(none)") + " cannot be tied to the file. This is a fault in this client, not in the file"
+    );
+  }
   const temporary = target + ".tmp";
   // The second argument of JSON.stringify is a replacer, and an array there is
   // an allow-list of key names applied at EVERY depth, not a top-level
@@ -1039,7 +1075,12 @@ export async function main(argv) {
           ]
         );
       } catch (error) {
-        fail(error instanceof VerifyumError ? EXIT_UNAVAILABLE : EXIT_USAGE, error.message);
+        fail(
+          error instanceof ReceiptRefused ? EXIT_FAILED
+            : error instanceof VerifyumError ? EXIT_UNAVAILABLE
+            : EXIT_USAGE,
+          error.message
+        );
       }
       continue;
     }
@@ -1047,6 +1088,10 @@ export async function main(argv) {
     if (command === "verify") {
       try {
         const receipt = await readReceipt(fs, target);
+        if (!draftHasNonce(receipt?.private_draft)) {
+          fail(EXIT_FAILED, target + ": " + RECEIPT_WITHOUT_NONCE);
+          continue;
+        }
         const data = await fs.readFile(target);
         const result = flags.has("--offline")
           ? await verifyOffline(data, receipt)
@@ -1082,6 +1127,12 @@ export async function main(argv) {
     if (command === "upgrade") {
       try {
         const receipt = await readReceipt(fs, target);
+        // Evidence cannot make up for a missing nonce, and "upgraded" would
+        // tell the holder the receipt is fine.
+        if (!draftHasNonce(receipt?.private_draft)) {
+          fail(EXIT_FAILED, target + ": " + RECEIPT_WITHOUT_NONCE);
+          continue;
+        }
         if (receiptIsComplete(receipt) && receiptHasDailyChain(receipt) && !flags.has("--force")) {
           emit({ file: target, upgraded: false, self_bearing: true, daily_chain: true }, asJson, ["already complete  " + target]);
           continue;

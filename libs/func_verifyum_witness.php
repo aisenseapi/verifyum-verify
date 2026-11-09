@@ -782,7 +782,11 @@ function verifyum_witness_validate_channel_receipt( array $receipt, ?array $chec
         or !in_array( $receipt['channel'], verifyum_witness_channels(), true )
         or !in_array( $receipt['state'], [ 'pending', 'confirmed', 'unavailable', 'failed' ], true )
         or !is_int( $receipt['attempt'] )
-        or $receipt['attempt'] < 1
+    ){
+        throw new InvalidArgumentException( 'The witness channel receipt is invalid' );
+    }
+    if (
+        $receipt['attempt'] < 1
         or !verifyum_witness_canonical_time( $receipt['observed_at'] )
         or !verifyum_witness_valid_digest( $receipt['subject_digest'] )
         or !is_array( $receipt['artifacts'] )
@@ -1099,7 +1103,11 @@ function verifyum_witness_validate_checkpoint( array $checkpoint, ?string $expec
         or ( $expected_kind !== null and $checkpoint['kind'] !== $expected_kind )
         or !in_array( $checkpoint['network'], [ 'devnet', 'mainnet-beta' ], true )
         or !verifyum_witness_canonical_time( $checkpoint['period_start'] )
-        or !verifyum_witness_canonical_time( $checkpoint['period_end'] )
+    ){
+        throw new InvalidArgumentException( 'The witness checkpoint is invalid' );
+    }
+    if (
+        !verifyum_witness_canonical_time( $checkpoint['period_end'] )
         or !verifyum_witness_canonical_time( $checkpoint['created_at'] )
         or $checkpoint['algorithm'] !== VERIFYUM_WITNESS_MERKLE_ALGORITHM
         or !is_int( $checkpoint['subject_count'] )
@@ -1257,7 +1265,11 @@ function verifyum_witness_validate_membership( array $membership, array $checkpo
         or !is_string( $membership['checkpoint_hash'] )
         or !hash_equals( $checkpoint['checkpoint_hash'], $membership['checkpoint_hash'] )
         or $membership['subject_type'] !== $checkpoint['subject_type']
-        or !is_string( $membership['subject_id'] )
+    ){
+        throw new InvalidArgumentException( 'The witness membership is invalid' );
+    }
+    if (
+        !is_string( $membership['subject_id'] )
         or !verifyum_witness_valid_digest( $membership['leaf_hash'] )
         or !is_int( $membership['leaf_index'] )
         or $membership['leaf_index'] < 0

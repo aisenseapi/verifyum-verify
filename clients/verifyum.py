@@ -64,7 +64,7 @@ __all__ = [
 
 API_BASE = os.environ.get("VERIFYUM_API_BASE", "https://api.verifyum.com")
 PROOF_DOMAIN = os.environ.get("VERIFYUM_PROOF_DOMAIN", "verifyum.com")
-USER_AGENT = "verifyum-python/1.4.0"
+USER_AGENT = "verifyum-python/1.4.1"
 # What verify_witness checks, and what it does not. It once reported
 # `daily_witnessed` whenever a daily chain was present and said the checkpoint
 # was the one the external witnesses hold; a locally built daily checkpoint
@@ -569,6 +569,24 @@ def anchor_record(record: dict, **kwargs) -> dict:
     return anchor_bytes(jcs(record), **kwargs)
 
 
+def _draft_has_nonce(draft) -> bool:
+    """True when a private draft can still tie data to its proof: it carries the nonce."""
+    manifest = draft.get("manifest") if isinstance(draft, dict) else None
+    nonce = manifest.get("nonce") if isinstance(manifest, dict) else None
+    return isinstance(nonce, str) and nonce != ""
+
+
+# What a receipt without its nonce means, said the same way by every command
+# that meets one. The proof may stand on the ledger, but without the nonce
+# nothing, including Verifyum, can tie the file to it. Receipts are shared
+# between the clients, so this one explains the Node client's defect too.
+RECEIPT_WITHOUT_NONCE = (
+    "this receipt holds no private draft with a nonce, so nothing can tie the file to its proof. "
+    "The Node `verifyum stamp` from 1.2.0 to 1.4.0, which the GitHub Action runs, wrote receipts "
+    "like this; stamp the file again with 1.4.1 or later"
+)
+
+
 def verify(proof_id: str, data: bytes, draft: dict) -> dict:
     """Checks that `data` matches the draft and that the proof is finalized.
 
@@ -576,6 +594,10 @@ def verify(proof_id: str, data: bytes, draft: dict) -> dict:
     fully independent result, also fetch the Solana transaction named in the
     metadata from any RPC endpoint and compare its memo.
     """
+    if not _draft_has_nonce(draft):
+        raise VerifyumError(
+            "the private draft is missing or carries no nonce, so nothing can tie the data to the proof"
+        )
     manifest = draft["manifest"]
     checks = {
         "hash_matches": hashlib.sha256(data).hexdigest() == manifest["file"]["hash"]["value"],
@@ -1009,6 +1031,9 @@ def verify_offline(data: bytes, receipt: dict) -> dict:
     that the transaction has to be read from somewhere, which is what
     `verify_independent` does.
     """
+    # First, because no upgrade can supply what this lacks.
+    if not _draft_has_nonce(receipt.get("private_draft") if isinstance(receipt, dict) else None):
+        raise VerifyumError(RECEIPT_WITHOUT_NONCE)
     if not receipt_is_complete(receipt):
         raise VerifyumError(
             "receipt does not carry its evidence yet; run `verifyum upgrade` while online"
@@ -1153,11 +1178,16 @@ def receipt_path(path: str) -> str:
     return path + RECEIPT_SUFFIX
 
 
+class ReceiptRefused(Exception):
+    """Raised instead of writing a receipt that could never verify."""
+
+
 def write_receipt(path: str, proof: dict, evidence: dict | None = None) -> str:
     """Stores the proof and its draft beside the file.
 
     The mode request is honoured on POSIX and ignored on Windows, so this
-    does not make the file private on its own.
+    does not make the file private on its own. Refuses, with ReceiptRefused,
+    to write a receipt whose draft has no nonce.
     """
     target = receipt_path(path)
     document = {
@@ -1173,6 +1203,16 @@ def write_receipt(path: str, proof: dict, evidence: dict | None = None) -> str:
     # Everything needed to check this without asking us anything.
     for name, part in (evidence or {}).items():
         document[name] = part
+    # The Node client's writer read the draft under a name its anchor call
+    # never returns, and from 1.2.0 to 1.4.0 wrote null where the nonce
+    # belongs. This writer reads the right name; the guard is here so that
+    # neither can fail that way silently again. A receipt without the nonce
+    # is worse than none, so none is written.
+    if not _draft_has_nonce(document["private_draft"]):
+        raise ReceiptRefused(
+            "no receipt written for " + path + ": the draft that holds the nonce is missing, so proof "
+            + str(document["proof_id"]) + " cannot be tied to the file. This is a fault in this client, not in the file"
+        )
     body = json.dumps(document, indent=2, sort_keys=True) + "\n"
     temporary = target + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -1220,7 +1260,12 @@ def _cmd_stamp(args) -> int:
             worst = max(worst, EXIT_USAGE)
             continue
         evidence = fetch_evidence(proof["proof_id"]) if proof.get("proof_id") else {}
-        target = write_receipt(path, proof, evidence)
+        try:
+            target = write_receipt(path, proof, evidence)
+        except ReceiptRefused as error:
+            print("verifyum: " + str(error), file=sys.stderr)
+            worst = max(worst, EXIT_FAILED)
+            continue
         complete = receipt_is_complete(read_receipt(path))
         _emit(
             {"file": path, "receipt": target, "proof_id": proof.get("proof_id"), "status": proof.get("status"), "proof_url": proof.get("proof_url"), "self_bearing": complete},
@@ -1255,6 +1300,10 @@ def _cmd_verify(args) -> int:
         except (OSError, ValueError) as error:
             print("verifyum: " + str(error), file=sys.stderr)
             worst = max(worst, EXIT_USAGE)
+            continue
+        if not _draft_has_nonce(receipt.get("private_draft") if isinstance(receipt, dict) else None):
+            print("verifyum: " + path + ": " + RECEIPT_WITHOUT_NONCE, file=sys.stderr)
+            worst = max(worst, EXIT_FAILED)
             continue
         try:
             if args.offline:
@@ -1347,6 +1396,12 @@ def _cmd_upgrade(args) -> int:
         except (OSError, ValueError) as error:
             print("verifyum: " + str(error), file=sys.stderr)
             worst = max(worst, EXIT_USAGE)
+            continue
+        # Evidence cannot make up for a missing nonce, and "upgraded" would
+        # tell the holder the receipt is fine.
+        if not _draft_has_nonce(receipt.get("private_draft") if isinstance(receipt, dict) else None):
+            print("verifyum: " + path + ": " + RECEIPT_WITHOUT_NONCE, file=sys.stderr)
+            worst = max(worst, EXIT_FAILED)
             continue
         if receipt_is_complete(receipt) and receipt_has_daily_chain(receipt) and not args.force:
             _emit({"file": path, "upgraded": False, "self_bearing": True, "daily_chain": True}, args.json,
